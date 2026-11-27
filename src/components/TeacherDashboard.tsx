@@ -14,6 +14,7 @@ import {
   Plus,
   Settings,
   Share2,
+  Split,
   Table2,
   Trash2,
   UserCheck,
@@ -42,6 +43,7 @@ import { SurveySettingsModal } from './SurveySettingsModal';
 import { StudentShareModal } from './StudentShareModal';
 import { ClosenessHeatmap } from './ClosenessHeatmap';
 import { SociometryReportPanel } from './SociometryReportPanel';
+import { ClassPlacementSimulator } from './ClassPlacementSimulator';
 
 interface TeacherDashboardProps {
   user: User;
@@ -49,7 +51,7 @@ interface TeacherDashboardProps {
   onOpenStudentPortal: (joinCode?: string, accessCode?: string, isKiosk?: boolean) => void;
 }
 
-type WorkspaceTab = 'report' | 'sociogram' | 'heatmap' | 'analytics' | 'roster';
+type WorkspaceTab = 'report' | 'sociogram' | 'heatmap' | 'placement' | 'analytics' | 'roster';
 
 export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   user,
@@ -342,6 +344,22 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         >
           <Grid3X3 className="w-4 h-4 shrink-0" />
           친밀도 히트맵
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('placement');
+            setMobileMenuOpen(false);
+          }}
+          disabled={!activeSurvey}
+          className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer disabled:opacity-40 ${
+            activeTab === 'placement'
+              ? 'bg-blue-50 text-blue-800'
+              : 'text-slate-700 hover:bg-slate-100'
+          }`}
+        >
+          <Split className="w-4 h-4 shrink-0" />
+          반배정 시뮬레이션
         </button>
         <button
           type="button"
@@ -700,6 +718,15 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
 
               {activeTab === 'heatmap' && (
                 <ClosenessHeatmap
+                  survey={activeSurvey}
+                  students={students}
+                  responses={responses}
+                  onInspectStudent={handleViewStudentResponse}
+                />
+              )}
+
+              {activeTab === 'placement' && (
+                <ClassPlacementSimulator
                   survey={activeSurvey}
                   students={students}
                   responses={responses}
