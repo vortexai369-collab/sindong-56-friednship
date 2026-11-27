@@ -6,6 +6,8 @@ import {
   Check,
   Copy,
   Database,
+  FileText,
+  Grid3X3,
   LogOut,
   Menu,
   Network,
@@ -38,6 +40,8 @@ import { RosterManager } from './RosterManager';
 import { AnalyticsView } from './AnalyticsView';
 import { SurveySettingsModal } from './SurveySettingsModal';
 import { StudentShareModal } from './StudentShareModal';
+import { ClosenessHeatmap } from './ClosenessHeatmap';
+import { SociometryReportPanel } from './SociometryReportPanel';
 
 interface TeacherDashboardProps {
   user: User;
@@ -45,7 +49,7 @@ interface TeacherDashboardProps {
   onOpenStudentPortal: (joinCode?: string, accessCode?: string, isKiosk?: boolean) => void;
 }
 
-type WorkspaceTab = 'sociogram' | 'roster' | 'analytics';
+type WorkspaceTab = 'report' | 'sociogram' | 'heatmap' | 'analytics' | 'roster';
 
 export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   user,
@@ -294,6 +298,22 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         <button
           type="button"
           onClick={() => {
+            setActiveTab('report');
+            setMobileMenuOpen(false);
+          }}
+          disabled={!activeSurvey}
+          className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer disabled:opacity-40 ${
+            activeTab === 'report'
+              ? 'bg-blue-50 text-blue-800'
+              : 'text-slate-700 hover:bg-slate-100'
+          }`}
+        >
+          <FileText className="w-4 h-4 shrink-0" />
+          소시오메트리 리포트
+        </button>
+        <button
+          type="button"
+          onClick={() => {
             setActiveTab('sociogram');
             setMobileMenuOpen(false);
           }}
@@ -305,7 +325,39 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           }`}
         >
           <Network className="w-4 h-4 shrink-0" />
-          교우관계망
+          교우관계망 · 연결 강도
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('heatmap');
+            setMobileMenuOpen(false);
+          }}
+          disabled={!activeSurvey}
+          className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer disabled:opacity-40 ${
+            activeTab === 'heatmap'
+              ? 'bg-blue-50 text-blue-800'
+              : 'text-slate-700 hover:bg-slate-100'
+          }`}
+        >
+          <Grid3X3 className="w-4 h-4 shrink-0" />
+          친밀도 히트맵
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('analytics');
+            setMobileMenuOpen(false);
+          }}
+          disabled={!activeSurvey}
+          className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer disabled:opacity-40 ${
+            activeTab === 'analytics'
+              ? 'bg-blue-50 text-blue-800'
+              : 'text-slate-700 hover:bg-slate-100'
+          }`}
+        >
+          <BarChart3 className="w-4 h-4 shrink-0" />
+          학생 응답 · 세부 분석
         </button>
         <button
           type="button"
@@ -322,22 +374,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         >
           <Table2 className="w-4 h-4 shrink-0" />
           학생 명단 · 시트
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setActiveTab('analytics');
-            setMobileMenuOpen(false);
-          }}
-          disabled={!activeSurvey}
-          className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer disabled:opacity-40 ${
-            activeTab === 'analytics'
-              ? 'bg-blue-50 text-blue-800'
-              : 'text-slate-700 hover:bg-slate-100'
-          }`}
-        >
-          <BarChart3 className="w-4 h-4 shrink-0" />
-          학생 응답 · 분석
         </button>
       </div>
 
@@ -640,6 +676,16 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             </div>
           ) : (
             <>
+              {activeTab === 'report' && (
+                <SociometryReportPanel
+                  survey={activeSurvey}
+                  students={students}
+                  responses={responses}
+                  onInspectStudent={handleViewStudentResponse}
+                  onNavigateTab={(tab) => setActiveTab(tab)}
+                />
+              )}
+
               {activeTab === 'sociogram' && (
                 <SociogramCanvas
                   survey={activeSurvey}
@@ -649,6 +695,15 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                     await runSafe(() => updateStudentMemo(activeSurvey.id, studentId, memo));
                   }}
                   onViewStudentResponse={handleViewStudentResponse}
+                />
+              )}
+
+              {activeTab === 'heatmap' && (
+                <ClosenessHeatmap
+                  survey={activeSurvey}
+                  students={students}
+                  responses={responses}
+                  onInspectStudent={handleViewStudentResponse}
                 />
               )}
 

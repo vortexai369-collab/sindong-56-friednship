@@ -15,6 +15,7 @@ import {
   triggerCsvDownload,
 } from '../utils/sociometry';
 import { ClosenessAnalysisPanel } from './ClosenessAnalysisPanel';
+import { ClosenessHeatmap } from './ClosenessHeatmap';
 
 interface AnalyticsViewProps {
   survey: Survey;
@@ -24,7 +25,14 @@ interface AnalyticsViewProps {
   onSaveMemo: (studentId: string, memo: string) => Promise<void>;
 }
 
-type SortKey = 'number' | 'avgCloseness' | 'positiveIn' | 'mutual' | 'negativeIn';
+type SortKey =
+  | 'number'
+  | 'belonging'
+  | 'influence'
+  | 'avgCloseness'
+  | 'positiveIn'
+  | 'mutual'
+  | 'negativeIn';
 type AnalyticsSubTab = 'closeness' | 'responses' | 'asymmetric' | 'metrics' | 'matrix' | 'notes';
 
 const TYPE_TEXT_COLOR: Record<SociometricType, string> = {
@@ -57,7 +65,6 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
   );
   const [sortKey, setSortKey] = useState<SortKey>('number');
   const [sortAsc, setSortAsc] = useState<boolean>(true);
-  const [hoverCell, setHoverCell] = useState<{ r: number; c: number } | null>(null);
 
   // Individual student response viewer state
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(
@@ -161,6 +168,12 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
       switch (sortKey) {
         case 'number':
           diff = a.student.number - b.student.number;
+          break;
+        case 'belonging':
+          diff = a.belongingScore - b.belongingScore;
+          break;
+        case 'influence':
+          diff = a.influenceScore - b.influenceScore;
           break;
         case 'avgCloseness':
           diff = (a.avgClosenessReceived ?? -9) - (b.avgClosenessReceived ?? -9);
@@ -329,7 +342,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
               { id: 'responses', label: `학생별 응답 보기 (${responses.length})` },
               { id: 'asymmetric', label: `관계 온도차 (${analytics.asymmetricPairs.length})` },
               { id: 'metrics', label: '학생별 지표표' },
-              { id: 'matrix', label: '친밀도 행렬표' },
+              { id: 'matrix', label: '친밀도 히트맵' },
               { id: 'notes', label: `비공개 메모 (${allPrivateNotes.length})` },
             ] as const
           ).map((tab) => (
@@ -769,6 +782,26 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                   <th className="py-2.5 px-3 text-right whitespace-nowrap">
                     <button
                       type="button"
+                      onClick={() => handleSort('belonging')}
+                      className="inline-flex items-center gap-1 hover:text-slate-900 cursor-pointer"
+                    >
+                      소속감
+                      <ArrowUpDown className="w-3 h-3" />
+                    </button>
+                  </th>
+                  <th className="py-2.5 px-3 text-right whitespace-nowrap">
+                    <button
+                      type="button"
+                      onClick={() => handleSort('influence')}
+                      className="inline-flex items-center gap-1 hover:text-slate-900 cursor-pointer"
+                    >
+                      영향력
+                      <ArrowUpDown className="w-3 h-3" />
+                    </button>
+                  </th>
+                  <th className="py-2.5 px-3 text-right whitespace-nowrap">
+                    <button
+                      type="button"
                       onClick={() => handleSort('avgCloseness')}
                       className="inline-flex items-center gap-1 hover:text-slate-900 cursor-pointer"
                     >
@@ -821,6 +854,22 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                       <span className="font-medium text-slate-900">{m.student.name}</span>
                     </td>
                     <td className="py-2 px-3 text-xs text-slate-600">{m.student.gender}</td>
+                    <td className="py-2 px-3 text-right font-mono text-xs font-semibold tabular-nums">
+                      <span
+                        className={
+                          m.belongingScore >= 60
+                            ? 'text-emerald-700'
+                            : m.belongingScore < 35
+                            ? 'text-amber-700'
+                            : 'text-slate-700'
+                        }
+                      >
+                        {m.belongingScore}
+                      </span>
+                    </td>
+                    <td className="py-2 px-3 text-right font-mono text-xs font-semibold text-blue-700 tabular-nums">
+                      {m.influenceScore}
+                    </td>
                     <td className="py-2 px-3 text-right font-mono text-xs font-semibold tabular-nums">
                       {m.avgClosenessReceived !== null ? (
                         <span
@@ -891,111 +940,17 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
         </div>
       )}
 
-      {/* SubTab 4: Closeness Adjacency Matrix */}
+      {/* SubTab 4: Closeness Heatmap Matrix */}
       {subTab === 'matrix' && (
-        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
-            <span>가로행(응답 학생) → 세로열(대상 친구)</span>
-            <div className="flex items-center gap-4 font-mono">
-              <span className="text-emerald-700 font-bold">+2 매우친함</span>
-              <span className="text-blue-700 font-semibold">+1 친한편</span>
-              <span className="text-amber-700 font-semibold">-1 어색</span>
-              <span className="text-red-700 font-bold">-2 불편</span>
-            </div>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="text-xs border-collapse w-full">
-              <thead>
-                <tr className="bg-slate-50 border-b border-slate-200">
-                  <th className="sticky left-0 z-10 bg-slate-50 py-2 px-3 text-left font-semibold text-slate-600 border-r border-slate-200 whitespace-nowrap">
-                    응답자 \ 대상
-                  </th>
-                  {orderedStudents.map((col, cIdx) => (
-                    <th
-                      key={col.id}
-                      className={`py-2 px-1.5 text-center font-medium min-w-[38px] tabular-nums ${
-                        hoverCell?.c === cIdx ? 'bg-blue-50 text-blue-800' : 'text-slate-600'
-                      }`}
-                      title={`${col.number}번 ${col.name}`}
-                    >
-                      <div className="text-[10px] text-slate-400">{col.number}</div>
-                      <div className="truncate max-w-[38px]">{col.name.slice(-2)}</div>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {orderedStudents.map((row, rIdx) => {
-                  const rowMetric = analytics.metricsById[row.id];
-                  return (
-                    <tr key={row.id}>
-                      <td
-                        className={`sticky left-0 z-10 py-1.5 px-3 border-r border-slate-200 whitespace-nowrap font-medium ${
-                          hoverCell?.r === rIdx
-                            ? 'bg-blue-50 text-blue-900'
-                            : 'bg-white text-slate-800'
-                        }`}
-                      >
-                        <span className="font-mono text-slate-400 mr-1.5 tabular-nums">
-                          {row.number}
-                        </span>
-                        {row.name}
-                      </td>
-                      {orderedStudents.map((col, cIdx) => {
-                        const isSelf = row.id === col.id;
-                        const pr = getRatingBetween(row.id, col.id);
-                        const isPosLegacy = !pr && rowMetric?.chosePositive.includes(col.id);
-                        const isNegLegacy = !pr && rowMetric?.choseNegative.includes(col.id);
-                        const isCrosshair = hoverCell?.r === rIdx || hoverCell?.c === cIdx;
-
-                        return (
-                          <td
-                            key={col.id}
-                            onMouseEnter={() => setHoverCell({ r: rIdx, c: cIdx })}
-                            onMouseLeave={() => setHoverCell(null)}
-                            className={`py-1.5 px-1 text-center font-mono tabular-nums border-r border-slate-50 ${
-                              isSelf
-                                ? 'bg-slate-100'
-                                : isCrosshair
-                                ? 'bg-blue-50/40'
-                                : ''
-                            }`}
-                          >
-                            {isSelf ? (
-                              <span className="text-slate-300">·</span>
-                            ) : pr ? (
-                              pr.score === 2 ? (
-                                <span className="text-emerald-700 font-bold" title={`${row.name} → ${col.name}: 매우 친함 (+2)`}>
-                                  +2
-                                </span>
-                              ) : pr.score === 1 ? (
-                                <span className="text-blue-700 font-semibold" title={`${row.name} → ${col.name}: 친한 편 (+1)`}>
-                                  +1
-                                </span>
-                              ) : pr.score === -1 ? (
-                                <span className="text-amber-700 font-semibold" title={`${row.name} → ${col.name}: 어색함 (-1)`}>
-                                  -1
-                                </span>
-                              ) : pr.score === -2 ? (
-                                <span className="text-red-700 font-bold" title={`${row.name} → ${col.name}: 불편함 (-2)`}>
-                                  -2
-                                </span>
-                              ) : null
-                            ) : isPosLegacy ? (
-                              <span className="text-blue-600">●</span>
-                            ) : isNegLegacy ? (
-                              <span className="text-red-600 font-bold">×</span>
-                            ) : null}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <ClosenessHeatmap
+          survey={survey}
+          students={students}
+          responses={responses}
+          onInspectStudent={(studentId) => {
+            setSelectedStudentId(studentId);
+            setSubTab('responses');
+          }}
+        />
       )}
 
       {/* SubTab 5: All Private Messages & Per-Friend Notes */}

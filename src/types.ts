@@ -191,6 +191,8 @@ export type SociometricType =
 
 export type ClosenessScoreCounts = Record<ClosenessScore, number>;
 
+export type IsolationRiskLevel = '높음' | '주의' | '안정';
+
 export interface StudentMetrics {
   student: Student;
   responded: boolean;
@@ -216,6 +218,12 @@ export interface StudentMetrics {
   topNegativeTags: Array<{ tag: string; count: number }>;
   sociometricType: SociometricType;
   teacherNote: string;
+  // Automated Sociometry Indices (0-100 scale)
+  belongingScore: number;      // 소속감 지수 (상호 유대, 단짝, 긍정 수용 기반)
+  influenceScore: number;      // 영향력 지수 (가중 수신 친밀도 + 2단계 중심성 기반)
+  bridgeScore: number;         // 가교 지수 (서로 연결되지 않은 친구·이성 간 매개 정도)
+  isolationRisk: IsolationRiskLevel;
+  recommendedPeerIds: string[]; // 고립·관심 학생을 위한 추천 모둠·짝 파트너 ID
 }
 
 export interface SociogramEdge {
@@ -266,6 +274,37 @@ export interface ClosenessAnalyticsSummary {
   tagStats: TagClosenessStat[];
 }
 
+export interface ReportFinding {
+  id: string;
+  severity: '긍정' | '관찰' | '주의';
+  title: string;
+  detail: string;
+}
+
+export interface ReportRecommendation {
+  id: string;
+  priority: '우선' | '권장' | '유지';
+  title: string;
+  detail: string;
+  targetStudentIds: string[];
+}
+
+export interface SociometryReportSummary {
+  classAvgBelonging: number;
+  classAvgInfluence: number;
+  networkDensity: number; // 긍정 연결 밀도 (%)
+  influenceConcentration: '균형' | '보통' | '소수 집중';
+  clusterCount: number;
+  unclusteredCount: number;
+  topInfluencers: StudentMetrics[];
+  highBelongingStudents: StudentMetrics[];
+  bridgeStudents: StudentMetrics[];
+  isolatedStudents: StudentMetrics[];
+  conflictRiskStudents: StudentMetrics[];
+  findings: ReportFinding[];
+  recommendations: ReportRecommendation[];
+}
+
 export interface ClassAnalytics {
   totalStudents: number;
   respondedCount: number;
@@ -276,6 +315,7 @@ export interface ClassAnalytics {
   attentionStudents: StudentMetrics[];
   asymmetricPairs: AsymmetricPair[];
   closenessSummary: ClosenessAnalyticsSummary;
+  sociometryReport: SociometryReportSummary;
   metricsById: Record<string, StudentMetrics>;
   metricsList: StudentMetrics[];
   edges: SociogramEdge[];

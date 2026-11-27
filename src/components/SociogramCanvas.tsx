@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as d3 from 'd3';
 import {
+  Activity,
   Crosshair,
   Download,
   Eye,
@@ -48,6 +49,8 @@ interface SimNode extends d3.SimulationNodeDatum {
   mutualCount: number;
   avgClosenessReceived: number | null;
   avgClosenessGiven: number | null;
+  belongingScore: number;
+  influenceScore: number;
   sociometricType: SociometricType;
   responded: boolean;
   clusterColor: string;
@@ -103,6 +106,8 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
   const [mutualOnly, setMutualOnly] = useState<boolean>(false);
   const [showConflict, setShowConflict] = useState<boolean>(true);
   const [highlightAttention, setHighlightAttention] = useState<boolean>(true);
+  const [strengthMode, setStrengthMode] = useState<boolean>(true);
+  const [minStrength, setMinStrength] = useState<number>(0);
 
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
   const [selectedClusterId, setSelectedClusterId] = useState<string | null>(null);
@@ -150,11 +155,16 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
 
   const visibleEdges = useMemo(() => {
     return analytics.edges.filter((edge) => {
-      if (edge.type === 'negative') return showConflict && !mutualOnly;
-      if (mutualOnly) return edge.type === 'mutual';
+      if (edge.type === 'negative') {
+        if (!showConflict || mutualOnly) return false;
+        if (minStrength > 0) return Math.abs(edge.minScore) >= Math.min(2, minStrength);
+        return true;
+      }
+      if (mutualOnly && edge.type !== 'mutual') return false;
+      if (minStrength > 0) return edge.weight >= minStrength;
       return true;
     });
-  }, [analytics.edges, mutualOnly, showConflict]);
+  }, [analytics.edges, mutualOnly, showConflict, minStrength]);
 
   const selectedMetric = selectedStudentId ? analytics.metricsById[selectedStudentId] : null;
   const activeCluster = selectedClusterId
@@ -287,7 +297,10 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
       }
     });
 
-    const nodeRadius = (d: SimNode) => Math.min(27, 15 + d.positiveIn * 2.1);
+    const nodeRadius = (d: SimNode) =>
+      strengthMode
+        ? Math.min(28, 14 + d.influenceScore * 0.14)
+        : Math.min(27, 15 + d.positiveIn * 2.1);
 
     // Prepare nodes with initial layout coordinates
     const maxPosIn = Math.max(1, ...analytics.metricsList.map((m) => m.positiveIn));
@@ -338,6 +351,8 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
         mutualCount: m.mutualIds.length,
         avgClosenessReceived: m.avgClosenessReceived,
         avgClosenessGiven: m.avgClosenessGiven,
+        belongingScore: m.belongingScore,
+        influenceScore: m.influenceScore,
         sociometricType: m.sociometricType,
         responded: m.responded,
         clusterColor: clusterColorByStudentId[m.student.id] || '#94A3B8',
@@ -469,10 +484,20 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
         return d.maxScore === 2 ? '#2563EB' : '#94A3B8';
       })
       .attr('stroke-width', (d) => {
+        if (strengthMode) {
+          if (d.type === 'mutual') {
+            if (d.weight >= 4) return 6.2;
+            if (d.weight === 3) return 4.4;
+            return 3.0;
+          }
+          if (d.type === 'negative') return d.minScore === -2 ? 3.2 : 1.7;
+          return d.maxScore === 2 ? 2.8 : 1.3;
+        }
         if (d.type === 'mutual') return d.minScore === 2 ? 3.8 : 2.3;
         if (d.type === 'negative') return d.minScore === -2 ? 2.1 : 1.5;
         return d.maxScore === 2 ? 2.2 : 1.4;
       })
+      .attr('stroke-linecap', 'round')
       .attr('stroke-dasharray', (d) =>
         d.type === 'negative' ? (d.minScore === -2 ? '5,3' : '4,4') : null
       )
@@ -529,6 +554,37 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
       })
       .on('mouseleave', () => setTooltip(null));
 
+    // Edge connection strength midpoint labels (rendered when strengthMode is enabled)
+    const linkLabelGroup = rootG.append('g').attr('class', 'link-labels');
+    const linkLabelSelection = linkLabelGroup
+      .selectAll<SVGTextElement, SimLink>('text')
+      .data(
+        strengthMode
+          ? links.filter(
+              (l) =>
+                (l.type === 'mutual' && l.weight >= 3) ||
+                (l.type === 'negative' && l.minScore === -2)
+            )
+          : []
+      )
+      .enter()
+      .append('text')
+      .attr('text-anchor', 'middle')
+      .attr('dy', '0.35em')
+      .attr('font-size', '9.5px')
+      .attr('font-weight', '700')
+      .attr('font-family', 'ui-monospace, SFMono-Regular, Menlo, monospace')
+      .attr('fill', (d) =>
+        d.type === 'negative' ? '#B91C1C' : d.weight >= 4 ? '#047857' : '#0369A1'
+      )
+      .attr('stroke', '#FFFFFF')
+      .attr('stroke-width', 3)
+      .attr('paint-order', 'stroke')
+      .style('pointer-events', 'none')
+      .text((d) =>
+        d.type === 'negative' ? `${d.minScore}` : `+${d.weight}`
+      );
+
     // Draw nodes
     const nodeGroup = rootG.append('g').attr('class', 'nodes');
     const nodeSelection = nodeGroup
@@ -564,8 +620,8 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
           x: pos.x,
           y: pos.y,
           title: `${d.number}번 ${d.name} (${d.gender})`,
-          subtitle: `${d.sociometricType} · 평균친밀 ${avgStr}`,
-          detail: `긍정받음 ${d.positiveIn} · 상호 ${d.mutualCount} · 불편·어색 ${d.negativeIn}`,
+          subtitle: `${d.sociometricType} · 소속감 ${d.belongingScore} · 영향력 ${d.influenceScore}`,
+          detail: `평균친밀 ${avgStr} · 상호 ${d.mutualCount} · 불편·어색 ${d.negativeIn}`,
         });
       })
       .on('mousemove', (event) => {
@@ -702,6 +758,18 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
         return `M${startX},${startY}A${curveRadius},${curveRadius} 0 0,1 ${endX},${endY}`;
       });
 
+      linkLabelSelection
+        .attr('x', (d) => {
+          const s = d.source as SimNode;
+          const t = d.target as SimNode;
+          return ((s.x ?? 0) + (t.x ?? 0)) / 2;
+        })
+        .attr('y', (d) => {
+          const s = d.source as SimNode;
+          const t = d.target as SimNode;
+          return ((s.y ?? 0) + (t.y ?? 0)) / 2;
+        });
+
       nodeSelection.attr('transform', (d) => `translate(${d.x ?? 0},${d.y ?? 0})`);
     };
 
@@ -717,6 +785,7 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
     layoutMode,
     colorBy,
     highlightAttention,
+    strengthMode,
     layoutSeed,
     students.length,
     clusterColorByStudentId,
@@ -741,12 +810,19 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
           const tid = typeof d.target === 'string' ? d.target : d.target.id;
           return memberSet.has(sid) && memberSet.has(tid) ? 0.95 : 0.06;
         });
+      svg.selectAll('.link-labels text').attr('opacity', 0.2);
       return;
     }
 
     if (!selectedStudentId) {
       svg.selectAll('.node-item').attr('opacity', 1);
-      svg.selectAll('.links path').attr('opacity', 0.82);
+      svg.selectAll<SVGPathElement, SimLink>('.links path').attr('opacity', (d) => {
+        if (!strengthMode) return 0.82;
+        if (d.type === 'mutual') return d.weight >= 4 ? 0.96 : d.weight === 3 ? 0.86 : 0.72;
+        if (d.type === 'negative') return d.minScore === -2 ? 0.9 : 0.65;
+        return d.maxScore === 2 ? 0.78 : 0.42;
+      });
+      svg.selectAll('.link-labels text').attr('opacity', 0.92);
       svg
         .selectAll<SVGCircleElement, SimNode>('.node-core')
         .attr('stroke', (d) => (d.responded ? '#FFFFFF' : '#CBD5E1'))
@@ -789,7 +865,15 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
         const tid = typeof d.target === 'string' ? d.target : d.target.id;
         return isEdgeRelevant(sid, tid, d.type) ? 0.96 : 0.06;
       });
-  }, [selectedStudentId, egoDirection, activeCluster, visibleEdges]);
+
+    svg
+      .selectAll<SVGTextElement, SimLink>('.link-labels text')
+      .attr('opacity', (d) => {
+        const sid = typeof d.source === 'string' ? d.source : d.source.id;
+        const tid = typeof d.target === 'string' ? d.target : d.target.id;
+        return isEdgeRelevant(sid, tid, d.type) ? 1 : 0.05;
+      });
+  }, [selectedStudentId, egoDirection, activeCluster, visibleEdges, strengthMode]);
 
   const handleZoom = (factor: number) => {
     if (!svgRef.current || !zoomBehaviorRef.current) return;
@@ -1086,6 +1170,31 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
+              onClick={() => setStrengthMode((v) => !v)}
+              className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md border transition-colors whitespace-nowrap cursor-pointer ${
+                strengthMode
+                  ? 'bg-blue-50 border-blue-300 text-blue-800'
+                  : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+              }`}
+            >
+              <Activity className="w-3.5 h-3.5" />
+              연결 강도 시각화
+            </button>
+
+            <select
+              value={minStrength}
+              onChange={(e) => setMinStrength(Number(e.target.value))}
+              aria-label="최소 연결 강도 필터"
+              className="text-xs font-medium border border-slate-200 rounded-md px-2 py-1 bg-white text-slate-700 focus:outline-none focus:border-blue-600"
+            >
+              <option value={0}>연결 강도: 전체</option>
+              <option value={2}>강도 +2 이상 (우호·단짝)</option>
+              <option value={3}>강도 +3 이상 (강한 상호)</option>
+              <option value={4}>강도 +4만 (최강 단짝)</option>
+            </select>
+
+            <button
+              type="button"
               onClick={() => setMutualOnly((v) => !v)}
               className={`px-2.5 py-1 text-xs font-medium rounded-md border transition-colors whitespace-nowrap cursor-pointer ${
                 mutualOnly
@@ -1317,25 +1426,23 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
               {/* Numeric summary strip */}
               <div className="grid grid-cols-4 gap-2 text-center py-2 border-b border-slate-100 tabular-nums">
                 <div>
+                  <p className="text-xs text-slate-500">소속감</p>
+                  <p className="text-base font-bold text-emerald-700">
+                    {selectedMetric.belongingScore}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500">영향력</p>
+                  <p className="text-base font-bold text-blue-700">
+                    {selectedMetric.influenceScore}
+                  </p>
+                </div>
+                <div>
                   <p className="text-xs text-slate-500">받은친밀</p>
                   <p className="text-base font-bold text-slate-900">
                     {selectedMetric.avgClosenessReceived !== null
                       ? `${selectedMetric.avgClosenessReceived > 0 ? '+' : ''}${selectedMetric.avgClosenessReceived.toFixed(2)}`
                       : '—'}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-500">준친밀</p>
-                  <p className="text-base font-bold text-slate-700">
-                    {selectedMetric.avgClosenessGiven !== null
-                      ? `${selectedMetric.avgClosenessGiven > 0 ? '+' : ''}${selectedMetric.avgClosenessGiven.toFixed(2)}`
-                      : '—'}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-500">상호단짝</p>
-                  <p className="text-base font-bold text-emerald-700">
-                    {selectedMetric.bestFriendPairIds.length}
                   </p>
                 </div>
                 <div>

@@ -6,9 +6,13 @@ import {
   ClosenessScore,
   ClosenessScoreCounts,
   Gender,
+  IsolationRiskLevel,
   PeerRating,
+  ReportFinding,
+  ReportRecommendation,
   SociogramEdge,
   SociometricType,
+  SociometryReportSummary,
   Student,
   StudentMetrics,
   SurveyAnswer,
@@ -266,7 +270,7 @@ export function exportRosterToCsv(students: Student[], respondedIds: Set<string>
 
 export function exportAnalyticsToCsv(analytics: ClassAnalytics): string {
   const header =
-    '학생ID,번호,이름,성별,응답상태,받은평균친밀도,준평균친밀도,받은+2,받은+1,받은0,받은-1,받은-2,상호단짝(+2),상호친구수,교우관계유형,교사메모';
+    '학생ID,번호,이름,성별,응답상태,소속감지수,영향력지수,가교지수,고립위험도,받은평균친밀도,준평균친밀도,받은+2,받은+1,받은0,받은-1,받은-2,상호단짝(+2),상호친구수,교우관계유형,교사메모';
   const rows = [...analytics.metricsList]
     .sort((a, b) => a.student.number - b.student.number)
     .map((m) => {
@@ -278,6 +282,10 @@ export function exportAnalyticsToCsv(analytics: ClassAnalytics): string {
         esc(m.student.name),
         m.student.gender,
         m.responded ? '응답완료' : '미응답',
+        m.belongingScore,
+        m.influenceScore,
+        m.bridgeScore,
+        m.isolationRisk,
         m.avgClosenessReceived !== null ? m.avgClosenessReceived.toFixed(2) : '',
         m.avgClosenessGiven !== null ? m.avgClosenessGiven.toFixed(2) : '',
         m.receivedScoreCounts[2],
@@ -754,6 +762,26 @@ export function computeClassAnalytics(
       .sort((a, b) => b.count - a.count)
       .slice(0, 4);
 
+  // Pre-compute normalization factors for Belonging, Influence, and Bridge indices
+  const maxPosInTotal = Math.max(4, ...sortedStudents.map((s) => posInTotalCount[s.id] || 0));
+  const twoHopPrestigeRaw: Record<string, number> = {};
+  sortedStudents.forEach((s) => {
+    let sum = 0;
+    chosenByPos[s.id].forEach((chooserId) => {
+      sum += 1 + chosenByPos[chooserId].size * 0.65 + veryCloseInCount[chooserId] * 0.35;
+    });
+    twoHopPrestigeRaw[s.id] = sum;
+  });
+  const maxTwoHop = Math.max(3, ...Object.values(twoHopPrestigeRaw));
+
+  const studentById: Record<string, Student> = {};
+  sortedStudents.forEach((s) => {
+    studentById[s.id] = s;
+  });
+
+  const hasPositiveTie = (a: string, b: string) =>
+    chosePos[a]?.has(b) || chosePos[b]?.has(a);
+
   const metricsById: Record<string, StudentMetrics> = {};
   const metricsList: StudentMetrics[] = [];
 
@@ -765,6 +793,7 @@ export function computeClassAnalytics(
     const mutualIds = Array.from(chosePos[student.id]).filter((id) =>
       chosenByPos[student.id].has(id)
     );
+    const bestFriendPairIds = Array.from(bestFriendsByStudent[student.id]);
     const avgClosenessReceived =
       receivedScoreCount[student.id] > 0
         ? Number((receivedScoreSum[student.id] / receivedScoreCount[student.id]).toFixed(2))
@@ -804,6 +833,91 @@ export function computeClassAnalytics(
 
     typeCounts[sociometricType] += 1;
 
+    // 1. Belonging Index (소속감 지수, 0-100)
+    let belongingScore = 0;
+    if (respondedCount > 0) {
+      const possibleResponders = Math.max(1, respondedCount - (responseMap.has(student.id) ? 1 : 0));
+      const mutualComponent = Math.min(48, mutualIds.length * 15 + bestFriendPairIds.length * 6);
+      const acceptanceTarget = Math.max(2, Math.min(5, possibleResponders * 0.35));
+      const acceptanceComponent = Math.min(36, (posIn / acceptanceTarget) * 36);
+      const outgoingComponent = Math.min(16, (posOut / Math.max(2, Math.min(4, n - 1))) * 16);
+      const conflictPenalty = Math.min(
+        30,
+        negIn * 7 + (receivedCountsMap[student.id][-2] || 0) * 5
+      );
+      belongingScore = Math.max(
+        0,
+        Math.min(100, Math.round(mutualComponent + acceptanceComponent + outgoingComponent - conflictPenalty))
+      );
+    }
+
+    // 2. Influence Index (영향력 지수, 0-100)
+    let influenceScore = 0;
+    if (respondedCount > 0) {
+      const directStrength = (posInTotalCount[student.id] / maxPosInTotal) * 54;
+      const twoHopPrestige = (twoHopPrestigeRaw[student.id] / maxTwoHop) * 31;
+      const veryCloseBonus = Math.min(15, veryCloseInCount[student.id] * 4);
+      let rawInfluence = directStrength + twoHopPrestige + veryCloseBonus;
+      if (avgClosenessReceived !== null && avgClosenessReceived < -0.1) {
+        rawInfluence *= 0.82;
+      }
+      influenceScore = Math.max(0, Math.min(100, Math.round(rawInfluence)));
+    }
+
+    // 3. Bridge Index (가교 역할 지수, 0-100)
+    let bridgeScore = 0;
+    if (respondedCount > 0) {
+      const posNeighborSet = new Set<string>([
+        ...Array.from(chosenByPos[student.id]),
+        ...Array.from(chosePos[student.id]),
+      ]);
+      const neighbors = Array.from(posNeighborSet);
+      if (neighbors.length >= 2) {
+        let totalPairs = 0;
+        let unconnectedPairs = 0;
+        for (let i = 0; i < neighbors.length; i++) {
+          for (let j = i + 1; j < neighbors.length; j++) {
+            totalPairs += 1;
+            if (!hasPositiveTie(neighbors[i], neighbors[j])) {
+              unconnectedPairs += 1;
+            }
+          }
+        }
+        const brokerageRatio = totalPairs > 0 ? unconnectedPairs / totalPairs : 0;
+        const degreeWeight = Math.min(1, neighbors.length / 4);
+        const oppositeGenderMutual = mutualIds.filter(
+          (nid) => studentById[nid] && studentById[nid].gender !== student.gender
+        ).length;
+        const oppositeGenderAny = neighbors.filter(
+          (nid) => studentById[nid] && studentById[nid].gender !== student.gender
+        ).length;
+        const crossGenderBonus = Math.min(35, oppositeGenderMutual * 22 + oppositeGenderAny * 8);
+        bridgeScore = Math.max(
+          0,
+          Math.min(100, Math.round(brokerageRatio * degreeWeight * 65 + crossGenderBonus))
+        );
+      }
+    }
+
+    // 4. Isolation Risk Level (고립 위험도)
+    let isolationRisk: IsolationRiskLevel = '안정';
+    if (respondedCount >= 2) {
+      if (
+        posIn === 0 ||
+        (mutualIds.length === 0 && posIn <= 1) ||
+        belongingScore < 28
+      ) {
+        isolationRisk = '높음';
+      } else if (
+        belongingScore < 48 ||
+        sociometricType === '고립·관심형' ||
+        sociometricType === '갈등·주의형' ||
+        (mutualIds.length === 0 && posIn <= 2)
+      ) {
+        isolationRisk = '주의';
+      }
+    }
+
     const metric: StudentMetrics = {
       student,
       responded: responseMap.has(student.id),
@@ -819,7 +933,7 @@ export function computeClassAnalytics(
       receivedScoreCounts: receivedCountsMap[student.id],
       givenScoreCounts: givenCountsMap[student.id],
       mutualIds,
-      bestFriendPairIds: Array.from(bestFriendsByStudent[student.id]),
+      bestFriendPairIds,
       mutualConflictIds: Array.from(mutualConflictsByStudent[student.id]),
       chosenByPositive: Array.from(chosenByPos[student.id]),
       chosePositive: Array.from(chosePos[student.id]),
@@ -829,10 +943,45 @@ export function computeClassAnalytics(
       topNegativeTags: sortTags(negTagCounts[student.id]),
       sociometricType,
       teacherNote: responseMap.get(student.id)?.teacherNote || '',
+      belongingScore,
+      influenceScore,
+      bridgeScore,
+      isolationRisk,
+      recommendedPeerIds: [],
     };
 
     metricsById[student.id] = metric;
     metricsList.push(metric);
+  });
+
+  // Compute recommended supportive/bridge peers for each student (especially useful for isolated students)
+  metricsList.forEach((m) => {
+    const candidates = metricsList
+      .filter((other) => other.student.id !== m.student.id)
+      .map((other) => {
+        const hasConflict =
+          chosenByNeg[m.student.id].has(other.student.id) ||
+          choseNeg[m.student.id].has(other.student.id);
+        if (hasConflict) return { id: other.student.id, score: -100 };
+
+        const recFromOther = pairScoreMap.get(`${other.student.id}__${m.student.id}`)?.score ?? 0;
+        const givenToOther = pairScoreMap.get(`${m.student.id}__${other.student.id}`)?.score ?? 0;
+
+        let score = 0;
+        if (recFromOther === 2) score += 42;
+        else if (recFromOther === 1) score += 28;
+        if (givenToOther === 2) score += 22;
+        else if (givenToOther === 1) score += 12;
+        score += other.bridgeScore * 0.25 + other.influenceScore * 0.15;
+        if (other.sociometricType === '갈등·주의형') score -= 25;
+        return { id: other.student.id, score };
+      })
+      .filter((c) => c.score >= 18)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 2)
+      .map((c) => c.id);
+
+    m.recommendedPeerIds = candidates;
   });
 
   const attentionStudents = metricsList
@@ -850,22 +999,292 @@ export function computeClassAnalytics(
       return score(b) - score(a);
     });
 
+  // Build Automated Classroom Sociometry Summary Report
+  const possibleDirectedPairs = n > 1 ? respondedCount * (n - 1) : 1;
+  const networkDensity =
+    respondedCount > 0 && n > 1
+      ? Math.min(100, Math.round((totalPositiveDirected / possibleDirectedPairs) * 100))
+      : 0;
+
+  const classAvgBelonging =
+    n > 0 ? Math.round(metricsList.reduce((acc, m) => acc + m.belongingScore, 0) / n) : 0;
+  const classAvgInfluence =
+    n > 0 ? Math.round(metricsList.reduce((acc, m) => acc + m.influenceScore, 0) / n) : 0;
+
+  // Influence concentration (check top 20% share of weighted positive in-degree)
+  const totalWeightedPos = metricsList.reduce((acc, m) => acc + m.positiveInTotal, 0);
+  const sortedByWeightedPos = [...metricsList].sort(
+    (a, b) => b.positiveInTotal - a.positiveInTotal
+  );
+  const topSliceCount = Math.max(1, Math.ceil(n * 0.2));
+  const topSliceSum = sortedByWeightedPos
+    .slice(0, topSliceCount)
+    .reduce((acc, m) => acc + m.positiveInTotal, 0);
+  const topShare = totalWeightedPos > 0 ? topSliceSum / totalWeightedPos : 0;
+  const influenceConcentration: SociometryReportSummary['influenceConcentration'] =
+    topShare >= 0.48 ? '소수 집중' : topShare >= 0.34 ? '보통' : '균형';
+
+  // Cluster count using mutual ties
+  const tempClusters = detectFriendClustersFromMetrics(metricsList, metricsById);
+  const clusteredSet = new Set<string>();
+  tempClusters.forEach((c) => c.memberIds.forEach((id) => clusteredSet.add(id)));
+  const unclusteredCount = Math.max(0, n - clusteredSet.size);
+
+  const topInfluencers = [...metricsList]
+    .filter((m) => m.influenceScore >= 45 && m.positiveIn >= 2)
+    .sort((a, b) => b.influenceScore - a.influenceScore || b.positiveInTotal - a.positiveInTotal)
+    .slice(0, 4);
+
+  const highBelongingStudents = [...metricsList]
+    .filter((m) => m.belongingScore >= 65)
+    .sort((a, b) => b.belongingScore - a.belongingScore)
+    .slice(0, 4);
+
+  const bridgeStudents = [...metricsList]
+    .filter((m) => m.bridgeScore >= 35 && m.positiveIn >= 2)
+    .sort((a, b) => b.bridgeScore - a.bridgeScore || b.influenceScore - a.influenceScore)
+    .slice(0, 4);
+
+  const isolatedStudents = [...metricsList]
+    .filter((m) => m.isolationRisk === '높음' || m.sociometricType === '고립·관심형')
+    .sort((a, b) => a.belongingScore - b.belongingScore || a.positiveIn - b.positiveIn);
+
+  const conflictRiskStudents = [...metricsList]
+    .filter(
+      (m) =>
+        m.sociometricType === '갈등·주의형' ||
+        m.negativeIn >= 2 ||
+        m.receivedScoreCounts[-2] >= 2
+    )
+    .sort(
+      (a, b) =>
+        b.receivedScoreCounts[-2] * 2 +
+        b.negativeIn -
+        (a.receivedScoreCounts[-2] * 2 + a.negativeIn)
+    );
+
+  const reciprocityRate =
+    totalPositiveDirected > 0 ? Math.round((mutualDirectedCount / totalPositiveDirected) * 100) : 0;
+
+  const findings: ReportFinding[] = [];
+  const recommendations: ReportRecommendation[] = [];
+
+  if (respondedCount >= 2) {
+    // Finding 1: Overall Cohesion & Belonging
+    if (classAvgBelonging >= 62 && reciprocityRate >= 55) {
+      findings.push({
+        id: 'cohesion_strong',
+        severity: '긍정',
+        title: `안정적인 학급 소속감과 상호 유대 (평균 소속감 ${classAvgBelonging}점 · 호혜율 ${reciprocityRate}%)`,
+        detail: `전체 긍정 선택 중 ${reciprocityRate}%가 상호 선택으로 이어졌으며 핵심 단짝(+2↔+2) ${bestMutualPairs.length}쌍이 형성되어 학급 내 정서적 안정감이 양호합니다.`,
+      });
+    } else if (classAvgBelonging >= 42) {
+      findings.push({
+        id: 'cohesion_mid',
+        severity: '관찰',
+        title: `보통 수준의 학급 소속감 (평균 ${classAvgBelonging}점 · 연결 밀도 ${networkDensity}%)`,
+        detail: `상호 선택 비율은 ${reciprocityRate}%이며, 일부 학생은 특정 소그룹에 집중되고 주변부 학생과의 연결이 얕은 편입니다.`,
+      });
+    } else {
+      findings.push({
+        id: 'cohesion_low',
+        severity: '주의',
+        title: `학급 전반의 소속감·상호 유대 강화 필요 (평균 소속감 ${classAvgBelonging}점)`,
+        detail: `긍정 연결 밀도가 ${networkDensity}%, 호혜율이 ${reciprocityRate}%로 낮아 학급 단위 공동체 활동과 협력 프로젝트가 권장됩니다.`,
+      });
+    }
+
+    // Finding 2: Isolated students
+    if (isolatedStudents.length > 0) {
+      const names = isolatedStudents
+        .slice(0, 4)
+        .map((m) => `${m.student.number}번 ${m.student.name}`)
+        .join(', ');
+      findings.push({
+        id: 'isolated_alert',
+        severity: '주의',
+        title: `고립·소속감 저하 학생 ${isolatedStudents.length}명 감지`,
+        detail: `${names}${isolatedStudents.length > 4 ? ` 외 ${isolatedStudents.length - 4}명` : ''} 학생은 상호 친구가 없거나 받은 친밀도가 낮아 또래 관계망에서 주변부에 위치해 있습니다.`,
+      });
+
+      isolatedStudents.slice(0, 3).forEach((iso) => {
+        const partnerNames = iso.recommendedPeerIds
+          .map((pid) => metricsById[pid])
+          .filter(Boolean)
+          .map((pm) => `${pm.student.number}번 ${pm.student.name}`);
+
+        recommendations.push({
+          id: `rec_iso_${iso.student.id}`,
+          priority: '우선',
+          title: `${iso.student.number}번 ${iso.student.name} 학생 소속감 회복 지원`,
+          detail:
+            partnerNames.length > 0
+              ? `소속감 지수 ${iso.belongingScore}점(상호 친구 ${iso.mutualIds.length}명)입니다. 긍정 접점 또는 가교 성향이 높은 ${partnerNames.join(', ')} 학생과 모둠·짝 활동을 우선 배정해 자연스러운 교류를 유도해 보세요.`
+              : `소속감 지수 ${iso.belongingScore}점으로 또래 접점이 매우 적습니다. 개별 면담을 통해 관심사를 파악하고 소규모 협력 역할(모둠 서기·준비물 담당 등)을 부여해 보세요.`,
+          targetStudentIds: [iso.student.id, ...iso.recommendedPeerIds],
+        });
+      });
+    } else {
+      findings.push({
+        id: 'isolated_none',
+        severity: '긍정',
+        title: '고립 위험군 학생이 발견되지 않았습니다',
+        detail: '대부분의 학생이 최소 1명 이상의 또래와 긍정적인 관계를 유지하고 있습니다.',
+      });
+    }
+
+    // Finding 3: Conflict pairs / conflict risk students
+    if (conflictPairs.length > 0 || conflictRiskStudents.length > 0) {
+      const topConflictNames = conflictRiskStudents
+        .slice(0, 3)
+        .map((m) => `${m.student.number}번 ${m.student.name}(불편·어색 ${m.negativeIn}건)`)
+        .join(', ');
+      const topNegTag = tagStats.find((t) => t.category === 'negative');
+      findings.push({
+        id: 'conflict_alert',
+        severity: '주의',
+        title: `갈등·불편(-2 포함) 관계 쌍 ${conflictPairs.length}건 감지`,
+        detail: `${topConflictNames ? `${topConflictNames} 중심으로 ` : ''}관계 마찰이 확인되었습니다.${topNegTag ? ` 가장 빈번한 갈등 요인은 #${topNegTag.tag}(${topNegTag.totalCount}건)입니다.` : ''}`,
+      });
+
+      if (conflictRiskStudents.length > 0) {
+        const focusConflict = conflictRiskStudents[0];
+        recommendations.push({
+          id: `rec_conflict_${focusConflict.student.id}`,
+          priority: '우선',
+          title: `${focusConflict.student.number}번 ${focusConflict.student.name} 중심 갈등 중재 및 자리 분리`,
+          detail: `불편함(-2) ${focusConflict.receivedScoreCounts[-2]}건 포함 총 ${focusConflict.negativeIn}명의 친구로부터 부정 평가를 받았습니다. 직접 갈등 쌍은 모둠·자리를 분리하되, 학생의 개별 메모를 확인해 중재 상담을 진행해 주세요.`,
+          targetStudentIds: [focusConflict.student.id],
+        });
+      }
+    }
+
+    // Finding 4: Influence & Bridge Structure
+    if (topInfluencers.length > 0 || bridgeStudents.length > 0) {
+      const infNames = topInfluencers
+        .slice(0, 3)
+        .map((m) => `${m.student.number}번 ${m.student.name}(${m.influenceScore}점)`)
+        .join(', ');
+      const brNames = bridgeStudents
+        .slice(0, 2)
+        .map((m) => `${m.student.number}번 ${m.student.name}`)
+        .join(', ');
+      findings.push({
+        id: 'influence_structure',
+        severity: influenceConcentration === '소수 집중' ? '관찰' : '긍정',
+        title: `영향력 분포: ${influenceConcentration} · 또래 그룹 ${tempClusters.length}개 형성`,
+        detail: `${infNames ? `핵심 영향력 학생은 ${infNames}이며` : '학급 내 영향력이 고르게 분포하며'}, ${brNames ? `${brNames} 학생이 서로 다른 또래 집단을 잇는 가교 역할을 수행하고 있습니다.` : '또래 그룹 간 교류를 늘릴 가교 활동이 유익합니다.'}`,
+      });
+
+      if (bridgeStudents.length > 0) {
+        recommendations.push({
+          id: 'rec_bridge_leverage',
+          priority: '권장',
+          title: `가교 학생(${bridgeStudents.slice(0, 2).map((m) => m.student.name).join(', ')}) 중심의 모둠 리더 배치`,
+          detail: `서로 다른 또래 그룹과 두루 소통하는 가교 학생을 모둠 조장으로 배치하면 학급 내 파벌화를 예방하고 전체 네트워크 밀도(${networkDensity}%)를 효과적으로 높일 수 있습니다.`,
+          targetStudentIds: bridgeStudents.slice(0, 2).map((m) => m.student.id),
+        });
+      }
+    }
+
+    // Finding 5: Asymmetric perception gaps
+    if (asymmetricPairs.length >= 2) {
+      recommendations.push({
+        id: 'rec_asymmetric',
+        priority: '권장',
+        title: `관계 온도차 ${asymmetricPairs.length}쌍 관찰 (일방적 호감·서먹함 점검)`,
+        detail: `서로 친밀도 인식이 2단계 이상 차이 나는 쌍이 ${asymmetricPairs.length}쌍 발견되었습니다. '관계 온도차' 탭에서 일방적 기대나 오해가 있는 학생을 미리 살펴봐 주세요.`,
+        targetStudentIds: asymmetricPairs.slice(0, 2).flatMap((p) => [p.fromId, p.toId]),
+      });
+    }
+  }
+
+  const sociometryReport: SociometryReportSummary = {
+    classAvgBelonging,
+    classAvgInfluence,
+    networkDensity,
+    influenceConcentration,
+    clusterCount: tempClusters.length,
+    unclusteredCount,
+    topInfluencers,
+    highBelongingStudents,
+    bridgeStudents,
+    isolatedStudents,
+    conflictRiskStudents,
+    findings,
+    recommendations,
+  };
+
   return {
     totalStudents: n,
     respondedCount,
     responseRate: n > 0 ? Math.round((respondedCount / n) * 100) : 0,
     mutualPairCount: handledMutual.size,
-    reciprocityRate:
-      totalPositiveDirected > 0 ? Math.round((mutualDirectedCount / totalPositiveDirected) * 100) : 0,
+    reciprocityRate,
     avgPositiveIn: n > 0 ? Number((posInArr.reduce((a, b) => a + b, 0) / n).toFixed(1)) : 0,
     attentionStudents,
     asymmetricPairs,
     closenessSummary,
+    sociometryReport,
     metricsById,
     metricsList,
     edges,
     typeCounts,
   };
+}
+
+function detectFriendClustersFromMetrics(
+  metricsList: StudentMetrics[],
+  metricsById: Record<string, StudentMetrics>
+): FriendCluster[] {
+  const visited = new Set<string>();
+  const clusters: FriendCluster[] = [];
+  const adj: Record<string, Set<string>> = {};
+
+  metricsList.forEach((m) => {
+    adj[m.student.id] = new Set(m.mutualIds);
+  });
+
+  const sortedIds = [...metricsList]
+    .sort((a, b) => b.mutualIds.length - a.mutualIds.length || a.student.number - b.student.number)
+    .map((m) => m.student.id);
+
+  let clusterIdx = 0;
+  for (const startId of sortedIds) {
+    if (visited.has(startId)) continue;
+    const queue = [startId];
+    const component: string[] = [];
+    visited.add(startId);
+
+    while (queue.length > 0) {
+      const curr = queue.shift()!;
+      component.push(curr);
+      adj[curr]?.forEach((nextId) => {
+        if (!visited.has(nextId)) {
+          visited.add(nextId);
+          queue.push(nextId);
+        }
+      });
+    }
+
+    if (component.length >= 2) {
+      component.sort(
+        (a, b) =>
+          (metricsById[a]?.student.number || 0) -
+          (metricsById[b]?.student.number || 0)
+      );
+      const letter = String.fromCharCode(65 + (clusterIdx % 26));
+      clusters.push({
+        id: `cluster_${clusterIdx}`,
+        label: `또래 그룹 ${letter}`,
+        memberIds: component,
+        color: CLUSTER_COLORS[clusterIdx % CLUSTER_COLORS.length],
+      });
+      clusterIdx += 1;
+    }
+  }
+
+  return clusters;
 }
 
 export interface FriendCluster {
