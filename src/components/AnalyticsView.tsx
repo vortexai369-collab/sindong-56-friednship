@@ -487,129 +487,176 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                   <div className="py-10 text-center text-sm text-slate-500">
                     {selectedStudent.name} 학생은 아직 설문 응답을 제출하지 않았습니다.
                   </div>
-                ) : selectedResponse.peerRatings && selectedResponse.peerRatings.length > 0 ? (
-                  <>
-                    {/* Filter by Score */}
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
-                        {(
-                          [
-                            { id: 'all', label: '전체 친구' },
-                            { id: 'positive', label: '친함 (+1/+2)' },
-                            { id: 'negative', label: '어색·불편 (-1/-2)' },
-                            { id: 'neutral', label: '보통 (0)' },
-                          ] as const
-                        ).map((f) => (
-                          <button
-                            key={f.id}
-                            type="button"
-                            onClick={() => setScoreFilter(f.id)}
-                            className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
-                              scoreFilter === f.id
-                                ? 'bg-white text-slate-900 shadow-xs'
-                                : 'text-slate-600 hover:text-slate-900'
-                            }`}
-                          >
-                            {f.label}
-                          </button>
-                        ))}
-                      </div>
-                      <span className="text-xs text-slate-500 tabular-nums">
-                        표시 {selectedStudentRatingRows.length}명
-                      </span>
-                    </div>
-
-                    {/* 1:1 Peer Ratings Table */}
-                    <div className="overflow-x-auto border border-slate-200 rounded-lg">
-                      <table className="w-full text-sm border-collapse">
-                        <thead>
-                          <tr className="bg-slate-50 border-b border-slate-200 text-left text-xs font-semibold text-slate-600">
-                            <th className="py-2.5 px-3 whitespace-nowrap">대상 친구</th>
-                            <th className="py-2.5 px-3 whitespace-nowrap">
-                              {selectedStudent.name}의 평가
-                            </th>
-                            <th className="py-2.5 px-3 whitespace-nowrap">상대방의 맞평가</th>
-                            <th className="py-2.5 px-3 whitespace-nowrap">관계 태그</th>
-                            <th className="py-2.5 px-3 whitespace-nowrap">개별 메모</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {selectedStudentRatingRows.length === 0 ? (
-                            <tr>
-                              <td
-                                colSpan={5}
-                                className="py-8 text-center text-xs text-slate-500"
-                              >
-                                선택한 필터에 해당하는 친구가 없습니다.
-                              </td>
-                            </tr>
-                          ) : (
-                            selectedStudentRatingRows.map(({ target, given, reverse, gap }) => (
-                              <tr key={target.id} className="hover:bg-slate-50/70">
-                                <td className="py-2.5 px-3 whitespace-nowrap">
-                                  <button
-                                    type="button"
-                                    onClick={() => setSelectedStudentId(target.id)}
-                                    className="text-left hover:text-blue-700 cursor-pointer"
-                                  >
-                                    <span className="font-mono text-xs text-slate-400 mr-1.5 tabular-nums">
-                                      {target.number}
-                                    </span>
-                                    <span className="font-medium text-slate-900">
-                                      {target.name}
-                                    </span>
-                                  </button>
-                                </td>
-                                <td
-                                  className={`py-2.5 px-3 text-xs whitespace-nowrap tabular-nums ${scoreColorClass(
-                                    given?.score
-                                  )}`}
-                                >
-                                  {formatScoreLabel(given?.score)}
-                                </td>
-                                <td className="py-2.5 px-3 text-xs whitespace-nowrap tabular-nums">
-                                  <span className={scoreColorClass(reverse?.score)}>
-                                    {reverse ? formatScoreLabel(reverse.score) : '미응답'}
-                                  </span>
-                                  {gap !== null && gap >= 2 && (
-                                    <span className="ml-2 text-amber-700 font-semibold">
-                                      · 온도차 {gap}
-                                    </span>
-                                  )}
-                                </td>
-                                <td className="py-2.5 px-3 text-xs text-slate-700">
-                                  {given?.tags?.length
-                                    ? given.tags.map((t) => `#${t}`).join('  ')
-                                    : '—'}
-                                </td>
-                                <td className="py-2.5 px-3 text-xs text-slate-600 max-w-[220px]">
-                                  {given?.note ? given.note : '—'}
-                                </td>
-                              </tr>
-                            ))
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </>
                 ) : (
-                  /* Fallback display for legacy nomination-only responses */
-                  <div className="space-y-3 border border-slate-200 rounded-lg p-4">
-                    <p className="text-xs font-semibold text-slate-600">문항별 지명 응답</p>
-                    {selectedResponse.answers.map((ans) => {
-                      const qObj = survey.questions.find((q) => q.id === ans.questionId);
-                      return (
-                        <div key={ans.questionId} className="text-sm space-y-0.5">
-                          <p className="text-xs text-slate-500">{qObj?.text || ans.questionId}</p>
-                          <p className="font-medium text-slate-900">
-                            {ans.selectedIds.length > 0
-                              ? ans.selectedIds.map(nameOf).join(', ')
-                              : '선택 없음'}
+                  <>
+                    {/* Teacher-configured Survey Questions Answers */}
+                    {selectedResponse.answers.length > 0 && (
+                      <div className="border border-slate-200 rounded-lg overflow-hidden">
+                        <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                          <p className="text-xs font-semibold text-slate-700">
+                            조사 문항별 응답 ({selectedResponse.answers.length}문항)
                           </p>
+                          <span className="text-[11px] text-slate-500">
+                            선생님이 설정한 문항별 학생 선택 결과
+                          </span>
                         </div>
-                      );
-                    })}
-                  </div>
+                        <div className="divide-y divide-slate-100">
+                          {selectedResponse.answers.map((ans, idx) => {
+                            const qObj = survey.questions.find((q) => q.id === ans.questionId);
+                            const isNeg = (qObj?.category || ans.category) === 'negative';
+                            return (
+                              <div
+                                key={ans.questionId}
+                                className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                              >
+                                <div className="min-w-0">
+                                  <p className="text-xs font-medium text-slate-600">
+                                    <span className="font-mono text-slate-400 mr-1.5">
+                                      Q{idx + 1}
+                                    </span>
+                                    <span
+                                      className={`font-semibold mr-1.5 ${
+                                        isNeg ? 'text-red-600' : 'text-blue-700'
+                                      }`}
+                                    >
+                                      [{isNeg ? '갈등·불편' : '긍정'}]
+                                    </span>
+                                    {qObj?.text || ans.questionId}
+                                  </p>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs shrink-0">
+                                  {ans.selectedIds.length > 0 ? (
+                                    ans.selectedIds.map((targetId) => (
+                                      <button
+                                        key={targetId}
+                                        type="button"
+                                        onClick={() => setSelectedStudentId(targetId)}
+                                        className={`font-semibold hover:underline cursor-pointer ${
+                                          isNeg ? 'text-red-700' : 'text-slate-900'
+                                        }`}
+                                      >
+                                        {nameOf(targetId)}
+                                      </button>
+                                    ))
+                                  ) : (
+                                    <span className="text-slate-400">해당 없음 (선택 안 함)</span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 1:1 Peer Ratings Section */}
+                    {selectedResponse.peerRatings && selectedResponse.peerRatings.length > 0 && (
+                      <div className="space-y-3">
+                        {/* Filter by Score */}
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
+                            {(
+                              [
+                                { id: 'all', label: '전체 친구' },
+                                { id: 'positive', label: '친함 (+1/+2)' },
+                                { id: 'negative', label: '어색·불편 (-1/-2)' },
+                                { id: 'neutral', label: '보통 (0)' },
+                              ] as const
+                            ).map((f) => (
+                              <button
+                                key={f.id}
+                                type="button"
+                                onClick={() => setScoreFilter(f.id)}
+                                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
+                                  scoreFilter === f.id
+                                    ? 'bg-white text-slate-900 shadow-xs'
+                                    : 'text-slate-600 hover:text-slate-900'
+                                }`}
+                              >
+                                {f.label}
+                              </button>
+                            ))}
+                          </div>
+                          <span className="text-xs text-slate-500 tabular-nums">
+                            친구별 친밀도 표시 {selectedStudentRatingRows.length}명
+                          </span>
+                        </div>
+
+                        {/* 1:1 Peer Ratings Table */}
+                        <div className="overflow-x-auto border border-slate-200 rounded-lg">
+                          <table className="w-full text-sm border-collapse">
+                            <thead>
+                              <tr className="bg-slate-50 border-b border-slate-200 text-left text-xs font-semibold text-slate-600">
+                                <th className="py-2.5 px-3 whitespace-nowrap">대상 친구</th>
+                                <th className="py-2.5 px-3 whitespace-nowrap">
+                                  {selectedStudent.name}의 평가
+                                </th>
+                                <th className="py-2.5 px-3 whitespace-nowrap">상대방의 맞평가</th>
+                                <th className="py-2.5 px-3 whitespace-nowrap">관계 태그</th>
+                                <th className="py-2.5 px-3 whitespace-nowrap">개별 메모</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {selectedStudentRatingRows.length === 0 ? (
+                                <tr>
+                                  <td
+                                    colSpan={5}
+                                    className="py-8 text-center text-xs text-slate-500"
+                                  >
+                                    선택한 필터에 해당하는 친구가 없습니다.
+                                  </td>
+                                </tr>
+                              ) : (
+                                selectedStudentRatingRows.map(({ target, given, reverse, gap }) => (
+                                  <tr key={target.id} className="hover:bg-slate-50/70">
+                                    <td className="py-2.5 px-3 whitespace-nowrap">
+                                      <button
+                                        type="button"
+                                        onClick={() => setSelectedStudentId(target.id)}
+                                        className="text-left hover:text-blue-700 cursor-pointer"
+                                      >
+                                        <span className="font-mono text-xs text-slate-400 mr-1.5 tabular-nums">
+                                          {target.number}
+                                        </span>
+                                        <span className="font-medium text-slate-900">
+                                          {target.name}
+                                        </span>
+                                      </button>
+                                    </td>
+                                    <td
+                                      className={`py-2.5 px-3 text-xs whitespace-nowrap tabular-nums ${scoreColorClass(
+                                        given?.score
+                                      )}`}
+                                    >
+                                      {formatScoreLabel(given?.score)}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-xs whitespace-nowrap tabular-nums">
+                                      <span className={scoreColorClass(reverse?.score)}>
+                                        {reverse ? formatScoreLabel(reverse.score) : '미응답'}
+                                      </span>
+                                      {gap !== null && gap >= 2 && (
+                                        <span className="ml-2 text-amber-700 font-semibold">
+                                          · 온도차 {gap}
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-xs text-slate-700">
+                                      {given?.tags?.length
+                                        ? given.tags.map((t) => `#${t}`).join('  ')
+                                        : '—'}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-xs text-slate-600 max-w-[220px]">
+                                      {given?.note ? given.note : '—'}
+                                    </td>
+                                  </tr>
+                                ))
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
 
                 {/* Student General Note + Teacher Counseling Memo */}

@@ -617,13 +617,18 @@ export async function fetchInviteByCodes(
 export async function submitStudentResponse(
   invite: SurveyInvite,
   peerRatings: PeerRating[],
-  teacherNote: string
+  teacherNote: string,
+  explicitAnswers?: SurveyAnswer[]
 ): Promise<void> {
   const verifiedUid = auth.currentUser?.emailVerified ? auth.currentUser.uid : null;
   const submittedByUid = verifiedUid || `student_${invite.id}`;
 
   const path = `surveys/${invite.surveyId}/responses/${invite.studentDocId}`;
   const isTeacherOwner = Boolean(verifiedUid && verifiedUid === invite.ownerId);
+
+  const validClassmateIdSet = new Set(
+    invite.classmates.map((c) => c.id).filter((id) => id && id !== invite.studentDocId)
+  );
 
   const cleanPeerRatings: PeerRating[] = peerRatings
     .filter((r) => r.targetId && r.targetId !== invite.studentDocId)
@@ -641,10 +646,33 @@ export async function submitStudentResponse(
       };
     });
 
-  const derivedAnswers: SurveyAnswer[] = deriveAnswersFromPeerRatings(
-    cleanPeerRatings,
-    invite.questions.map((q) => ({ id: q.id, category: q.category }))
-  );
+  let finalAnswers: SurveyAnswer[];
+  if (explicitAnswers && explicitAnswers.length > 0 && invite.questions.length > 0) {
+    const answerByQId = new Map<string, SurveyAnswer>();
+    explicitAnswers.forEach((a) => answerByQId.set(a.questionId, a));
+
+    finalAnswers = invite.questions.slice(0, SCHEMA_LIMITS.MAX_QUESTIONS).map((q) => {
+      const found = answerByQId.get(q.id);
+      const maxAllowed = Math.max(1, Math.min(SCHEMA_LIMITS.MAX_CLASSMATES, q.maxSelect || 10));
+      const cleanIds = Array.from(
+        new Set(
+          (found?.selectedIds || [])
+            .map((id) => clampString(id, 128))
+            .filter((id) => id && id !== invite.studentDocId && validClassmateIdSet.has(id))
+        )
+      ).slice(0, maxAllowed);
+      return {
+        questionId: clampString(q.id, 32),
+        category: q.category === 'negative' ? ('negative' as const) : ('positive' as const),
+        selectedIds: cleanIds,
+      };
+    });
+  } else {
+    finalAnswers = deriveAnswersFromPeerRatings(
+      cleanPeerRatings,
+      invite.questions.map((q) => ({ id: q.id, category: q.category }))
+    );
+  }
 
   try {
     const batch = writeBatch(db);
@@ -658,7 +686,7 @@ export async function submitStudentResponse(
       studentCode: clampString(invite.studentCode, SCHEMA_LIMITS.STUDENT_CODE_MAX),
       inviteKey: invite.id,
       submittedByUid,
-      answers: derivedAnswers,
+      answers: finalAnswers,
       peerRatings: cleanPeerRatings,
       teacherNote: clampString(teacherNote, SCHEMA_LIMITS.NOTE_MAX),
       createdAt: serverTimestamp(),

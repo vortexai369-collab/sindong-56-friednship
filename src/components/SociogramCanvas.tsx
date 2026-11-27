@@ -1026,14 +1026,23 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
               ))}
             </div>
 
-            {/* Closeness & Tag Filter */}
+            {/* Question, Closeness & Tag Filter */}
             <select
               value={questionFilter}
               onChange={(e) => setQuestionFilter(e.target.value)}
-              aria-label="친밀도 단계 및 태그 필터"
-              className="text-xs font-medium border border-slate-200 rounded-lg px-2.5 py-1.5 bg-white text-slate-800 focus:outline-none focus:border-blue-600"
+              aria-label="조사 문항, 친밀도 단계 및 태그 필터"
+              className="text-xs font-medium border border-slate-200 rounded-lg px-2.5 py-1.5 bg-white text-slate-800 focus:outline-none focus:border-blue-600 max-w-[260px]"
             >
               <option value="all">전체 관계 (+2 ~ -2)</option>
+              {survey.questions.length > 0 && (
+                <optgroup label="조사 문항별 보기">
+                  {survey.questions.map((q, idx) => (
+                    <option key={q.id} value={`question:${q.id}`}>
+                      문항 {idx + 1}: {q.text.length > 26 ? `${q.text.slice(0, 26)}…` : q.text}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
               <optgroup label="친밀도 단계 필터">
                 <option value="score2">매우 친함 (+2)만 보기</option>
                 <option value="score1">친한 편 (+1)만 보기</option>

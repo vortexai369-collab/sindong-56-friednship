@@ -16,6 +16,7 @@ import {
   PeerRating,
   POSITIVE_RELATION_TAGS,
   SCHEMA_LIMITS,
+  SurveyAnswer,
   SurveyInvite,
 } from '../types';
 import { fetchInviteByCodes, submitStudentResponse } from '../services/firestoreService';
@@ -35,6 +36,8 @@ interface DraftRating {
   tags: string[];
   note: string;
 }
+
+type PortalStage = 'questions' | 'rating' | 'review';
 
 function getScoreBadgeClasses(score: ClosenessScore | undefined): string {
   switch (score) {
@@ -99,7 +102,11 @@ export const StudentSurveyPortal: React.FC<StudentSurveyPortalProps> = ({
   const [loadingInvite, setLoadingInvite] = useState(false);
 
   const [invite, setInvite] = useState<SurveyInvite | null>(null);
-  const [stage, setStage] = useState<'rating' | 'review'>('rating');
+  const [stage, setStage] = useState<PortalStage>('questions');
+  const [activeQuestionIndex, setActiveQuestionIndex] = useState<number>(0);
+  const [questionSelections, setQuestionSelections] = useState<Record<string, string[]>>({});
+  const [questionConfirmedEmpty, setQuestionConfirmedEmpty] = useState<Record<string, boolean>>({});
+
   const [activeIndex, setActiveIndex] = useState<number>(0);
   const [ratingsMap, setRatingsMap] = useState<Record<string, DraftRating>>({});
   const [teacherNote, setTeacherNote] = useState('');
@@ -137,7 +144,10 @@ export const StudentSurveyPortal: React.FC<StudentSurveyPortalProps> = ({
       }
 
       setInvite(found);
-      setStage('rating');
+      setStage(found.questions && found.questions.length > 0 ? 'questions' : 'rating');
+      setActiveQuestionIndex(0);
+      setQuestionSelections({});
+      setQuestionConfirmedEmpty({});
       setActiveIndex(0);
       setRatingsMap({});
       setTeacherNote('');
@@ -162,12 +172,34 @@ export const StudentSurveyPortal: React.FC<StudentSurveyPortalProps> = ({
     }
   }, [initialJoinCode, initialAccessCode]);
 
+  const surveyQuestions = useMemo(() => invite?.questions || [], [invite]);
+  const hasQuestions = surveyQuestions.length > 0;
+  const activeQuestion = surveyQuestions[activeQuestionIndex] || null;
+
   const selectableClassmates = useMemo(() => {
     if (!invite) return [];
     return invite.classmates
       .filter((c) => c.id !== invite.studentDocId)
       .sort((a, b) => a.number - b.number);
   }, [invite]);
+
+  const classmateById = useMemo(() => {
+    const map: Record<string, { number: number; name: string }> = {};
+    selectableClassmates.forEach((c) => {
+      map[c.id] = { number: c.number, name: c.name };
+    });
+    return map;
+  }, [selectableClassmates]);
+
+  const answeredQuestionsCount = useMemo(() => {
+    return surveyQuestions.filter((q) => {
+      const picked = questionSelections[q.id] || [];
+      return picked.length > 0 || Boolean(questionConfirmedEmpty[q.id]);
+    }).length;
+  }, [surveyQuestions, questionSelections, questionConfirmedEmpty]);
+
+  const allQuestionsAnswered =
+    !hasQuestions || answeredQuestionsCount === surveyQuestions.length;
 
   const activeClassmate = selectableClassmates[activeIndex] || null;
   const activeRating = activeClassmate ? ratingsMap[activeClassmate.id] : undefined;
@@ -186,6 +218,55 @@ export const StudentSurveyPortal: React.FC<StudentSurveyPortalProps> = ({
     });
     return counts;
   }, [selectableClassmates, ratingsMap]);
+
+  const handleToggleQuestionPeer = (questionId: string, maxSelect: number, peerId: string) => {
+    setQuestionConfirmedEmpty((prev) =>
+      prev[questionId] ? { ...prev, [questionId]: false } : prev
+    );
+    setQuestionSelections((prev) => {
+      const current = prev[questionId] || [];
+      if (current.includes(peerId)) {
+        return { ...prev, [questionId]: current.filter((id) => id !== peerId) };
+      }
+      if (current.length >= maxSelect) {
+        return prev;
+      }
+      return { ...prev, [questionId]: [...current, peerId] };
+    });
+  };
+
+  const handleToggleQuestionEmpty = (questionId: string) => {
+    setQuestionConfirmedEmpty((prev) => {
+      const nextVal = !prev[questionId];
+      if (nextVal) {
+        setQuestionSelections((selPrev) => ({ ...selPrev, [questionId]: [] }));
+      }
+      return { ...prev, [questionId]: nextVal };
+    });
+  };
+
+  const handleNextQuestionOrStage = () => {
+    if (surveyQuestions.length === 0) {
+      setStage('rating');
+      return;
+    }
+    // Jump to next unanswered question if one exists
+    for (let offset = 1; offset <= surveyQuestions.length; offset++) {
+      const idx = (activeQuestionIndex + offset) % surveyQuestions.length;
+      const q = surveyQuestions[idx];
+      const answered =
+        (questionSelections[q.id]?.length || 0) > 0 || Boolean(questionConfirmedEmpty[q.id]);
+      if (!answered) {
+        setActiveQuestionIndex(idx);
+        return;
+      }
+    }
+    if (activeQuestionIndex < surveyQuestions.length - 1) {
+      setActiveQuestionIndex(activeQuestionIndex + 1);
+    } else {
+      setStage('rating');
+    }
+  };
 
   const handleSelectScore = (targetId: string, score: ClosenessScore) => {
     setRatingsMap((prev) => {
@@ -278,7 +359,14 @@ export const StudentSurveyPortal: React.FC<StudentSurveyPortalProps> = ({
           note: draft ? draft.note : '',
         };
       });
-      await submitStudentResponse(invite, peerRatings, teacherNote);
+      const explicitAnswers: SurveyAnswer[] | undefined = hasQuestions
+        ? surveyQuestions.map((q) => ({
+            questionId: q.id,
+            category: q.category,
+            selectedIds: questionSelections[q.id] || [],
+          }))
+        : undefined;
+      await submitStudentResponse(invite, peerRatings, teacherNote, explicitAnswers);
       setSubmittedDone(true);
     } catch {
       setLookupError('응답을 저장하지 못했습니다. 이미 제출되었거나 네트워크 연결을 확인해 주세요.');
@@ -290,11 +378,14 @@ export const StudentSurveyPortal: React.FC<StudentSurveyPortalProps> = ({
   const handleResetForNextStudent = () => {
     setInvite(null);
     setAccessCodeInput('');
+    setQuestionSelections({});
+    setQuestionConfirmedEmpty({});
+    setActiveQuestionIndex(0);
     setRatingsMap({});
     setTeacherNote('');
     setSubmittedDone(false);
     setLookupError(null);
-    setStage('rating');
+    setStage('questions');
     setActiveIndex(0);
   };
 
@@ -360,12 +451,12 @@ export const StudentSurveyPortal: React.FC<StudentSurveyPortalProps> = ({
 
             <div className="grid grid-cols-3 gap-2 py-2.5 border-y border-slate-100 text-center text-[11px] text-slate-600">
               <div>
-                <span className="block font-semibold text-slate-900">1. 코드 입력</span>
-                <span>학급·개인 코드</span>
+                <span className="block font-semibold text-slate-900">1. 조사 문항</span>
+                <span>선생님 질문 응답</span>
               </div>
               <div>
-                <span className="block font-semibold text-slate-900">2. 친구별 응답</span>
-                <span>5단계 친밀도</span>
+                <span className="block font-semibold text-slate-900">2. 친구별 친밀도</span>
+                <span>5단계 관계 선택</span>
               </div>
               <div>
                 <span className="block font-semibold text-slate-900">3. 비공개 제출</span>
@@ -448,7 +539,7 @@ export const StudentSurveyPortal: React.FC<StudentSurveyPortalProps> = ({
           </div>
         )}
 
-        {/* Step 3: Submitted Screen */}
+        {/* Submitted Screen */}
         {invite && submittedDone && (
           <div className="w-full max-w-md bg-white border border-slate-200 rounded-xl p-8 text-center space-y-5">
             <div className="w-12 h-12 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto">
@@ -491,10 +582,10 @@ export const StudentSurveyPortal: React.FC<StudentSurveyPortalProps> = ({
           </div>
         )}
 
-        {/* Step 1: 1-by-1 Classmate Clickable Rating Workspace */}
-        {invite && !submittedDone && stage === 'rating' && (
+        {/* Step 1: Teacher-Configured Survey Questions */}
+        {invite && !submittedDone && stage === 'questions' && hasQuestions && (
           <div className="w-full max-w-5xl space-y-4">
-            {/* Progress & Identity Header */}
+            {/* Step Progress & Identity Header */}
             <div className="bg-white border border-slate-200 rounded-xl px-5 py-4 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -508,15 +599,332 @@ export const StudentSurveyPortal: React.FC<StudentSurveyPortalProps> = ({
 
                 <div className="flex flex-wrap items-center gap-3">
                   <span className="text-xs font-semibold text-slate-700 tabular-nums">
+                    조사 문항 {answeredQuestionsCount} / {surveyQuestions.length} 완료
+                  </span>
+                  <button
+                    type="button"
+                    disabled={!allQuestionsAnswered}
+                    onClick={() => setStage('rating')}
+                    className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold text-white bg-blue-700 rounded-lg hover:bg-blue-800 disabled:opacity-40 transition-colors whitespace-nowrap cursor-pointer"
+                  >
+                    2단계 · 친구별 친밀도 평가로
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* 3-Step Bar */}
+              <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-100 text-xs">
+                <div className="font-semibold text-blue-700 flex items-center gap-1.5">
+                  <span className="w-5 h-5 rounded-full bg-blue-700 text-white inline-flex items-center justify-center text-[11px] font-bold">
+                    1
+                  </span>
+                  <span className="truncate">조사 문항 ({answeredQuestionsCount}/{surveyQuestions.length})</span>
+                </div>
+                <button
+                  type="button"
+                  disabled={!allQuestionsAnswered}
+                  onClick={() => setStage('rating')}
+                  className="text-left text-slate-500 hover:text-slate-900 disabled:opacity-50 flex items-center gap-1.5 cursor-pointer disabled:cursor-default"
+                >
+                  <span className="w-5 h-5 rounded-full bg-slate-200 text-slate-600 inline-flex items-center justify-center text-[11px] font-bold">
+                    2
+                  </span>
+                  <span className="truncate">친구별 친밀도 ({ratedCount}/{selectableClassmates.length})</span>
+                </button>
+                <div className="text-slate-400 flex items-center gap-1.5">
+                  <span className="w-5 h-5 rounded-full bg-slate-100 text-slate-400 inline-flex items-center justify-center text-[11px] font-bold">
+                    3
+                  </span>
+                  <span className="truncate">최종 확인 · 제출</span>
+                </div>
+              </div>
+
+              <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-700 transition-all duration-200"
+                  style={{
+                    width: `${
+                      surveyQuestions.length > 0
+                        ? (answeredQuestionsCount / surveyQuestions.length) * 100
+                        : 0
+                    }%`,
+                  }}
+                />
+              </div>
+            </div>
+
+            {/* 2-Column Question Workspace */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+              {/* Left: Question Navigation List */}
+              <div className="lg:col-span-4 bg-white border border-slate-200 rounded-xl overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                  <p className="text-xs font-semibold text-slate-700">
+                    조사 문항 목록
+                  </p>
+                  <span className="text-[11px] text-slate-400 tabular-nums">
+                    총 {surveyQuestions.length}문항
+                  </span>
+                </div>
+                <div className="divide-y divide-slate-100 max-h-[540px] overflow-y-auto">
+                  {surveyQuestions.map((q, idx) => {
+                    const picked = questionSelections[q.id] || [];
+                    const isEmptyConfirmed = Boolean(questionConfirmedEmpty[q.id]);
+                    const isActive = idx === activeQuestionIndex;
+                    const isNeg = q.category === 'negative';
+                    return (
+                      <button
+                        key={q.id}
+                        type="button"
+                        onClick={() => setActiveQuestionIndex(idx)}
+                        className={`w-full px-4 py-3 text-left transition-colors cursor-pointer space-y-1 ${
+                          isActive
+                            ? 'bg-blue-50/90 text-blue-950'
+                            : 'bg-white hover:bg-slate-50 text-slate-800'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-semibold tabular-nums">
+                            문항 {idx + 1}
+                            <span
+                              className={`ml-1.5 font-medium ${
+                                isNeg ? 'text-red-600' : 'text-blue-700'
+                              }`}
+                            >
+                              {isNeg ? '갈등·불편' : '긍정'}
+                            </span>
+                          </span>
+                          <span
+                            className={`text-[11px] font-medium whitespace-nowrap tabular-nums ${
+                              picked.length > 0
+                                ? isNeg
+                                  ? 'text-red-700'
+                                  : 'text-emerald-700'
+                                : isEmptyConfirmed
+                                ? 'text-slate-600'
+                                : 'text-slate-400'
+                            }`}
+                          >
+                            {picked.length > 0
+                              ? `${picked.length}/${q.maxSelect}명 선택`
+                              : isEmptyConfirmed
+                              ? '해당 없음'
+                              : '미응답'}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-600 line-clamp-2 leading-relaxed">
+                          {q.text}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Right: Active Question Card */}
+              <div className="lg:col-span-8 bg-white border border-slate-200 rounded-xl p-6 space-y-5">
+                {activeQuestion ? (() => {
+                  const pickedIds = questionSelections[activeQuestion.id] || [];
+                  const isEmptyConfirmed = Boolean(questionConfirmedEmpty[activeQuestion.id]);
+                  const isNeg = activeQuestion.category === 'negative';
+                  const atMax = pickedIds.length >= activeQuestion.maxSelect;
+                  const activeAnswered = pickedIds.length > 0 || isEmptyConfirmed;
+
+                  return (
+                    <>
+                      <div className="flex flex-wrap items-start justify-between gap-3 pb-4 border-b border-slate-100">
+                        <div className="space-y-1 flex-1 min-w-0">
+                          <div className="flex items-center gap-2 text-xs">
+                            <span className="font-semibold text-blue-700 tabular-nums">
+                              문항 {activeQuestionIndex + 1} / {surveyQuestions.length}
+                            </span>
+                            <span className="text-slate-300">·</span>
+                            <span
+                              className={`font-semibold ${
+                                isNeg ? 'text-red-600' : 'text-emerald-700'
+                              }`}
+                            >
+                              {isNeg ? '갈등·어려움 질문 (선생님만 확인)' : '긍정 교우 질문'}
+                            </span>
+                          </div>
+                          <h2 className="text-lg font-bold text-slate-900 leading-snug">
+                            {activeQuestion.text}
+                          </h2>
+                          <p className="text-xs text-slate-500 tabular-nums">
+                            최대 <strong>{activeQuestion.maxSelect}명</strong>까지 선택할 수 있습니다
+                            (현재 <strong>{pickedIds.length}명</strong> 선택됨)
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setActiveQuestionIndex((i) =>
+                                i > 0 ? i - 1 : surveyQuestions.length - 1
+                              )
+                            }
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50 cursor-pointer"
+                          >
+                            <ChevronLeft className="w-3.5 h-3.5" />
+                            이전
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setActiveQuestionIndex((i) =>
+                                i < surveyQuestions.length - 1 ? i + 1 : 0
+                              )
+                            }
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50 cursor-pointer"
+                          >
+                            다음
+                            <ChevronRight className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Classmate Multi-Select Grid */}
+                      <div className="space-y-3">
+                        {selectableClassmates.length === 0 ? (
+                          <p className="text-sm text-slate-500 py-4">
+                            선택할 학급 친구 명단이 없습니다.
+                          </p>
+                        ) : (
+                          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                            {selectableClassmates.map((mate) => {
+                              const isPicked = pickedIds.includes(mate.id);
+                              const isDisabled = !isPicked && atMax;
+                              return (
+                                <button
+                                  key={mate.id}
+                                  type="button"
+                                  disabled={isDisabled}
+                                  onClick={() =>
+                                    handleToggleQuestionPeer(
+                                      activeQuestion.id,
+                                      activeQuestion.maxSelect,
+                                      mate.id
+                                    )
+                                  }
+                                  className={`px-3 py-2.5 rounded-lg border text-left transition-all flex items-center justify-between gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                                    isPicked
+                                      ? isNeg
+                                        ? 'bg-red-50 border-red-600 text-red-950 font-semibold'
+                                        : 'bg-blue-50 border-blue-600 text-blue-950 font-semibold'
+                                      : 'bg-white border-slate-200 text-slate-800 hover:bg-slate-50 hover:border-slate-300'
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    <span className="font-mono text-xs text-slate-400 tabular-nums shrink-0">
+                                      {mate.number}
+                                    </span>
+                                    <span className="text-sm truncate">{mate.name}</span>
+                                  </div>
+                                  {isPicked && (
+                                    <Check
+                                      className={`w-4 h-4 shrink-0 ${
+                                        isNeg ? 'text-red-600' : 'text-blue-700'
+                                      }`}
+                                    />
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+
+                        {atMax && (
+                          <p className="text-xs text-amber-700">
+                            최대 선택 인원({activeQuestion.maxSelect}명)을 모두 선택했습니다. 다른
+                            친구를 선택하려면 이미 선택한 친구를 한 번 더 눌러 해제해 주세요.
+                          </p>
+                        )}
+
+                        {/* Explicit None Option */}
+                        <div className="pt-2">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleQuestionEmpty(activeQuestion.id)}
+                            className={`w-full sm:w-auto px-3.5 py-2 rounded-lg border text-xs font-medium inline-flex items-center gap-2 transition-colors cursor-pointer ${
+                              isEmptyConfirmed
+                                ? 'bg-slate-900 border-slate-900 text-white'
+                                : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                            }`}
+                          >
+                            {isEmptyConfirmed && <Check className="w-3.5 h-3.5" />}
+                            해당하는 친구가 없어요 (선택 안 함)
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Bottom Action Footer */}
+                      <div className="pt-4 border-t border-slate-100 flex items-center justify-between gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setInvite(null)}
+                          className="text-xs font-medium text-slate-500 hover:text-slate-800 cursor-pointer"
+                        >
+                          코드 다시 입력
+                        </button>
+
+                        <div className="flex items-center gap-2">
+                          {allQuestionsAnswered ? (
+                            <button
+                              type="button"
+                              onClick={() => setStage('rating')}
+                              className="inline-flex items-center gap-1.5 px-5 py-2.5 text-sm font-semibold text-white bg-emerald-700 rounded-lg hover:bg-emerald-800 transition-colors cursor-pointer"
+                            >
+                              문항 완료 · 친구별 친밀도 평가로
+                              <ArrowRight className="w-4 h-4" />
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={!activeAnswered}
+                              onClick={handleNextQuestionOrStage}
+                              className="inline-flex items-center gap-1.5 px-5 py-2.5 text-sm font-semibold text-white bg-blue-700 rounded-lg hover:bg-blue-800 disabled:opacity-40 transition-colors cursor-pointer"
+                            >
+                              다음 문항으로 이동
+                              <ArrowRight className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  );
+                })() : null}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Step 2: 1-by-1 Classmate Clickable Rating Workspace */}
+        {invite && !submittedDone && stage === 'rating' && (
+          <div className="w-full max-w-5xl space-y-4">
+            {/* Progress & Identity Header */}
+            <div className="bg-white border border-slate-200 rounded-xl px-5 py-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs text-slate-500">
+                    {invite.className} · {invite.surveyTitle}
+                  </p>
+                  <h1 className="text-base font-bold text-slate-900 mt-0.5">
+                    {invite.studentNumber}번 {invite.studentName} 학생의 친구별 친밀도 평가
+                  </h1>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span className="text-xs font-semibold text-slate-700 tabular-nums">
                     완료 {ratedCount} / {selectableClassmates.length}명
                   </span>
-                  {ratedCount > 0 && !allRated && (
+                  {!allRated && selectableClassmates.length > 0 && (
                     <button
                       type="button"
                       onClick={handleFillRemainingNeutral}
                       className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors whitespace-nowrap cursor-pointer"
                     >
-                      남은 친구 &lsquo;보통(0)&rsquo;으로 채우기
+                      남은 친구 모두 &lsquo;보통(0)&rsquo;으로 채우기
                     </button>
                   )}
                   <button
@@ -530,6 +938,38 @@ export const StudentSurveyPortal: React.FC<StudentSurveyPortalProps> = ({
                   </button>
                 </div>
               </div>
+
+              {hasQuestions && (
+                <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-100 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setStage('questions')}
+                    className="text-left text-emerald-700 hover:text-emerald-900 font-medium flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <span className="w-5 h-5 rounded-full bg-emerald-600 text-white inline-flex items-center justify-center text-[11px] font-bold">
+                      <Check className="w-3 h-3" />
+                    </span>
+                    <span className="truncate">조사 문항 ({answeredQuestionsCount}/{surveyQuestions.length})</span>
+                  </button>
+                  <div className="font-semibold text-blue-700 flex items-center gap-1.5">
+                    <span className="w-5 h-5 rounded-full bg-blue-700 text-white inline-flex items-center justify-center text-[11px] font-bold">
+                      2
+                    </span>
+                    <span className="truncate">친구별 친밀도 ({ratedCount}/{selectableClassmates.length})</span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={!allRated}
+                    onClick={() => setStage('review')}
+                    className="text-left text-slate-500 hover:text-slate-900 disabled:opacity-50 flex items-center gap-1.5 cursor-pointer disabled:cursor-default"
+                  >
+                    <span className="w-5 h-5 rounded-full bg-slate-200 text-slate-600 inline-flex items-center justify-center text-[11px] font-bold">
+                      3
+                    </span>
+                    <span className="truncate">최종 확인 · 제출</span>
+                  </button>
+                </div>
+              )}
 
               <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
                 <div
@@ -723,13 +1163,24 @@ export const StudentSurveyPortal: React.FC<StudentSurveyPortalProps> = ({
 
                     {/* Bottom Action Footer */}
                     <div className="pt-4 border-t border-slate-100 flex items-center justify-between gap-3">
-                      <button
-                        type="button"
-                        onClick={() => setInvite(null)}
-                        className="text-xs font-medium text-slate-500 hover:text-slate-800 cursor-pointer"
-                      >
-                        코드 다시 입력
-                      </button>
+                      {hasQuestions ? (
+                        <button
+                          type="button"
+                          onClick={() => setStage('questions')}
+                          className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-900 cursor-pointer"
+                        >
+                          <ArrowLeft className="w-3.5 h-3.5" />
+                          조사 문항으로 돌아가기
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setInvite(null)}
+                          className="text-xs font-medium text-slate-500 hover:text-slate-800 cursor-pointer"
+                        >
+                          코드 다시 입력
+                        </button>
+                      )}
 
                       <div className="flex items-center gap-2">
                         {allRated ? (
@@ -763,7 +1214,7 @@ export const StudentSurveyPortal: React.FC<StudentSurveyPortalProps> = ({
           </div>
         )}
 
-        {/* Step 2: Summary Review & Teacher Note */}
+        {/* Step 3: Summary Review & Teacher Note */}
         {invite && !submittedDone && stage === 'review' && (
           <div className="w-full max-w-2xl bg-white border border-slate-200 rounded-xl p-6 sm:p-8 space-y-6">
             <div className="space-y-1">
@@ -777,26 +1228,81 @@ export const StudentSurveyPortal: React.FC<StudentSurveyPortalProps> = ({
               </p>
             </div>
 
-            <div className="grid grid-cols-5 gap-2 text-center py-4 border-y border-slate-100 tabular-nums">
-              <div>
-                <p className="text-xs text-emerald-700 font-medium">매우 친함</p>
-                <p className="text-lg font-bold text-slate-900 mt-0.5">{summaryCounts[2]}명</p>
+            {hasQuestions && (
+              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                  <p className="text-xs font-semibold text-slate-700">
+                    조사 문항 응답 요약 ({surveyQuestions.length}문항)
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setStage('questions')}
+                    className="text-xs font-medium text-blue-700 hover:underline cursor-pointer"
+                  >
+                    문항 수정
+                  </button>
+                </div>
+                <div className="divide-y divide-slate-100">
+                  {surveyQuestions.map((q, idx) => {
+                    const picked = questionSelections[q.id] || [];
+                    return (
+                      <div
+                        key={q.id}
+                        className="px-4 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-xs"
+                      >
+                        <span className="text-slate-600">
+                          <strong className="font-mono text-slate-400 mr-1.5">Q{idx + 1}</strong>
+                          {q.text}
+                        </span>
+                        <span className="font-semibold text-slate-900 shrink-0">
+                          {picked.length > 0
+                            ? picked
+                                .map((id) => {
+                                  const m = classmateById[id];
+                                  return m ? `${m.number}번 ${m.name}` : id;
+                                })
+                                .join(', ')
+                            : '해당 없음'}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
-              <div>
-                <p className="text-xs text-blue-700 font-medium">친한 편</p>
-                <p className="text-lg font-bold text-slate-900 mt-0.5">{summaryCounts[1]}명</p>
+            )}
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-semibold text-slate-700">친구별 친밀도 응답 요약</p>
+                <button
+                  type="button"
+                  onClick={() => setStage('rating')}
+                  className="text-xs font-medium text-blue-700 hover:underline cursor-pointer"
+                >
+                  친밀도 수정
+                </button>
               </div>
-              <div>
-                <p className="text-xs text-slate-500 font-medium">보통</p>
-                <p className="text-lg font-bold text-slate-900 mt-0.5">{summaryCounts[0]}명</p>
-              </div>
-              <div>
-                <p className="text-xs text-amber-700 font-medium">어색함</p>
-                <p className="text-lg font-bold text-slate-900 mt-0.5">{summaryCounts[-1]}명</p>
-              </div>
-              <div>
-                <p className="text-xs text-red-700 font-medium">불편함</p>
-                <p className="text-lg font-bold text-slate-900 mt-0.5">{summaryCounts[-2]}명</p>
+              <div className="grid grid-cols-5 gap-2 text-center py-4 border-y border-slate-100 tabular-nums">
+                <div>
+                  <p className="text-xs text-emerald-700 font-medium">매우 친함</p>
+                  <p className="text-lg font-bold text-slate-900 mt-0.5">{summaryCounts[2]}명</p>
+                </div>
+                <div>
+                  <p className="text-xs text-blue-700 font-medium">친한 편</p>
+                  <p className="text-lg font-bold text-slate-900 mt-0.5">{summaryCounts[1]}명</p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500 font-medium">보통</p>
+                  <p className="text-lg font-bold text-slate-900 mt-0.5">{summaryCounts[0]}명</p>
+                </div>
+                <div>
+                  <p className="text-xs text-amber-700 font-medium">어색함</p>
+                  <p className="text-lg font-bold text-slate-900 mt-0.5">{summaryCounts[-1]}명</p>
+                </div>
+                <div>
+                  <p className="text-xs text-red-700 font-medium">불편함</p>
+                  <p className="text-lg font-bold text-slate-900 mt-0.5">{summaryCounts[-2]}명</p>
+                </div>
               </div>
             </div>
 

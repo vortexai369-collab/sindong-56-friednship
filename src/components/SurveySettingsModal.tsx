@@ -64,7 +64,7 @@ export const SurveySettingsModal: React.FC<SurveySettingsModalProps> = ({
     setQuestions((prev) => [
       ...prev,
       {
-        id: `q${Date.now().toString(36).slice(-4)}`,
+        id: `q${Date.now().toString(36).slice(-4)}${Math.random().toString(36).slice(2, 4)}`,
         text: '',
         category: 'positive',
         maxSelect: 3,

@@ -388,12 +388,18 @@ export function computeClassAnalytics(
 
   const isTagFilter = filterMode.startsWith('tag:');
   const targetTag = isTagFilter ? filterMode.slice(4) : '';
+  const isQuestionFilter = filterMode.startsWith('question:');
+  const targetQuestionId = isQuestionFilter ? filterMode.slice(9) : '';
 
   responseMap.forEach((resp, fromId) => {
     const ratings = resp.peerRatings;
-    if (ratings && ratings.length > 0) {
+    const hasPeerRatings = Boolean(ratings && ratings.length > 0);
+    const ratingByTarget = new Map<string, PeerRating>();
+
+    if (hasPeerRatings && ratings) {
       ratings.forEach((r) => {
         if (r.targetId === fromId || !studentIdSet.has(r.targetId)) return;
+        ratingByTarget.set(r.targetId, r);
         const key = `${fromId}__${r.targetId}`;
 
         // Always record true pairwise scores & overall class/student closeness stats
@@ -442,6 +448,9 @@ export function computeClassAnalytics(
           }
         });
 
+        // When filtering by a specific custom survey question, edges come from resp.answers below
+        if (isQuestionFilter) return;
+
         // Apply active filterMode to graph edges & degree metrics
         if (isTagFilter && !(r.tags || []).includes(targetTag)) return;
         if (filterMode === 'score2' && r.score !== 2) return;
@@ -474,7 +483,46 @@ export function computeClassAnalytics(
           });
         }
       });
-    } else {
+    }
+
+    if (isQuestionFilter) {
+      // Build edges directly from the student's actual nomination answer for targetQuestionId
+      resp.answers
+        .filter((ans) => ans.questionId === targetQuestionId)
+        .forEach((ans) => {
+          const uniqueTargets = Array.from(new Set(ans.selectedIds)).filter(
+            (targetId) => targetId !== fromId && studentIdSet.has(targetId)
+          );
+          uniqueTargets.forEach((targetId) => {
+            const key = `${fromId}__${targetId}`;
+            const pr = ratingByTarget.get(targetId);
+            if (ans.category === 'positive') {
+              const scoreVal = pr && pr.score >= 1 ? pr.score : 1;
+              chosePos[fromId].add(targetId);
+              chosenByPos[targetId].add(fromId);
+              posInTotalCount[targetId] += scoreVal;
+              posEdgeMap.set(key, {
+                weight: scoreVal,
+                maxScore: scoreVal,
+                minScore: scoreVal,
+                tags: pr?.tags || [],
+                questionIds: [ans.questionId],
+              });
+            } else {
+              const scoreVal = pr && pr.score <= -1 ? pr.score : -1;
+              choseNeg[fromId].add(targetId);
+              chosenByNeg[targetId].add(fromId);
+              negEdgeMap.set(key, {
+                weight: Math.abs(scoreVal),
+                maxScore: scoreVal,
+                minScore: scoreVal,
+                tags: pr?.tags || [],
+                questionIds: [ans.questionId],
+              });
+            }
+          });
+        });
+    } else if (!hasPeerRatings) {
       // Fallback for legacy nomination-only responses
       resp.answers.forEach((ans) => {
         const isClosenessFilter =
