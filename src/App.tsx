@@ -17,6 +17,8 @@ interface StudentPortalState {
   joinCode: string;
   accessCode: string;
   isKiosk: boolean;
+  openedFromTeacher: boolean;
+  openedFromLanding: boolean;
 }
 
 export interface AuthErrorState {
@@ -25,12 +27,25 @@ export interface AuthErrorState {
   suggestRedirectOrNewTab?: boolean;
 }
 
-function readDeepLinkParams(): { joinCode: string; accessCode: string } {
-  if (typeof window === 'undefined') return { joinCode: '', accessCode: '' };
+function readDeepLinkParams(): {
+  isStudentRoute: boolean;
+  joinCode: string;
+  accessCode: string;
+} {
+  if (typeof window === 'undefined') {
+    return { isStudentRoute: false, joinCode: '', accessCode: '' };
+  }
   const params = new URLSearchParams(window.location.search);
+  const joinCode = (params.get('join') || '').trim();
+  const accessCode = (params.get('code') || '').trim();
+  const isStudentRoute =
+    window.location.pathname.startsWith('/student') ||
+    params.get('mode') === 'student' ||
+    Boolean(joinCode);
   return {
-    joinCode: (params.get('join') || '').trim(),
-    accessCode: (params.get('code') || '').trim(),
+    isStudentRoute,
+    joinCode,
+    accessCode,
   };
 }
 
@@ -89,8 +104,7 @@ function formatAuthError(err: unknown): AuthErrorState {
 }
 
 function AppContent() {
-  const deepLink = readDeepLinkParams();
-  const hasStudentDeepLink = Boolean(deepLink.joinCode);
+  const initialDeepLink = readDeepLinkParams();
 
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
@@ -98,11 +112,29 @@ function AppContent() {
   const [authError, setAuthError] = useState<AuthErrorState | null>(null);
 
   const [studentPortal, setStudentPortal] = useState<StudentPortalState>({
-    active: hasStudentDeepLink,
-    joinCode: deepLink.joinCode,
-    accessCode: deepLink.accessCode,
+    active: initialDeepLink.isStudentRoute,
+    joinCode: initialDeepLink.joinCode,
+    accessCode: initialDeepLink.accessCode,
     isKiosk: false,
+    openedFromTeacher: false,
+    openedFromLanding: false,
   });
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const next = readDeepLinkParams();
+      setStudentPortal({
+        active: next.isStudentRoute,
+        joinCode: next.joinCode,
+        accessCode: next.accessCode,
+        isKiosk: false,
+        openedFromTeacher: false,
+        openedFromLanding: false,
+      });
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   useEffect(() => {
     // Wait for proactive redirect check / popup resolver warm-up
@@ -160,8 +192,77 @@ function AppContent() {
 
   const handleSignOut = async () => {
     await signOut(auth);
-    setStudentPortal({ active: false, joinCode: '', accessCode: '', isKiosk: false });
+    setStudentPortal({
+      active: false,
+      joinCode: '',
+      accessCode: '',
+      isKiosk: false,
+      openedFromTeacher: false,
+      openedFromLanding: false,
+    });
   };
+
+  const handleOpenStudentFromLanding = () => {
+    const nextUrl = `${window.location.pathname === '/student' ? '/' : window.location.pathname}?mode=student`;
+    window.history.pushState({}, '', nextUrl);
+    setStudentPortal({
+      active: true,
+      joinCode: '',
+      accessCode: '',
+      isKiosk: false,
+      openedFromTeacher: false,
+      openedFromLanding: true,
+    });
+  };
+
+  const handleExitStudentToLanding = () => {
+    const basePath = window.location.pathname.startsWith('/student')
+      ? '/'
+      : window.location.pathname;
+    window.history.pushState({}, '', basePath);
+    setStudentPortal({
+      active: false,
+      joinCode: '',
+      accessCode: '',
+      isKiosk: false,
+      openedFromTeacher: false,
+      openedFromLanding: false,
+    });
+  };
+
+  const handleExitStudentToTeacher = () => {
+    if (window.location.search || window.location.pathname.startsWith('/student')) {
+      window.history.replaceState({}, '', '/');
+    }
+    setStudentPortal({
+      active: false,
+      joinCode: '',
+      accessCode: '',
+      isKiosk: false,
+      openedFromTeacher: false,
+      openedFromLanding: false,
+    });
+  };
+
+  // Dedicated Student Entry Window: rendered immediately WITHOUT requiring Google login
+  if (studentPortal.active) {
+    return (
+      <StudentSurveyPortal
+        initialJoinCode={studentPortal.joinCode}
+        initialAccessCode={studentPortal.accessCode}
+        isKioskMode={studentPortal.isKiosk}
+        standaloneMode={!studentPortal.openedFromTeacher && !studentPortal.isKiosk}
+        onExitToTeacher={
+          user && studentPortal.openedFromTeacher ? handleExitStudentToTeacher : undefined
+        }
+        onExitToLanding={
+          !studentPortal.openedFromTeacher && studentPortal.openedFromLanding
+            ? handleExitStudentToLanding
+            : undefined
+        }
+      />
+    );
+  }
 
   if (!authReady) {
     return (
@@ -176,25 +277,9 @@ function AppContent() {
       <LandingPage
         onSignIn={handleSignIn}
         onSignInRedirect={handleSignInRedirect}
+        onOpenStudentEntry={handleOpenStudentFromLanding}
         authError={authError}
         signingIn={signingIn}
-        hasStudentDeepLink={hasStudentDeepLink}
-      />
-    );
-  }
-
-  if (studentPortal.active) {
-    return (
-      <StudentSurveyPortal
-        initialJoinCode={studentPortal.joinCode}
-        initialAccessCode={studentPortal.accessCode}
-        isKioskMode={studentPortal.isKiosk}
-        onExitToTeacher={() => {
-          if (window.location.search) {
-            window.history.replaceState({}, '', window.location.pathname);
-          }
-          setStudentPortal({ active: false, joinCode: '', accessCode: '', isKiosk: false });
-        }}
       />
     );
   }
@@ -209,6 +294,8 @@ function AppContent() {
           joinCode,
           accessCode,
           isKiosk,
+          openedFromTeacher: true,
+          openedFromLanding: false,
         })
       }
     />

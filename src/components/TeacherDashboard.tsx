@@ -8,10 +8,10 @@ import {
   Database,
   LogOut,
   Menu,
-  MonitorPlay,
   Network,
   Plus,
   Settings,
+  Share2,
   Table2,
   Trash2,
   UserCheck,
@@ -37,6 +37,7 @@ import { SociogramCanvas } from './SociogramCanvas';
 import { RosterManager } from './RosterManager';
 import { AnalyticsView } from './AnalyticsView';
 import { SurveySettingsModal } from './SurveySettingsModal';
+import { StudentShareModal } from './StudentShareModal';
 
 interface TeacherDashboardProps {
   user: User;
@@ -60,10 +61,12 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const [loadingSurveyData, setLoadingSurveyData] = useState(false);
 
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('sociogram');
+  const [focusedResponseStudentId, setFocusedResponseStudentId] = useState<string | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
   const [confirmDeleteSurvey, setConfirmDeleteSurvey] = useState(false);
   const [seedingSample, setSeedingSample] = useState(false);
   const [togglingStatus, setTogglingStatus] = useState(false);
@@ -113,6 +116,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
 
   // Subscribe to active survey's students & responses
   useEffect(() => {
+    setFocusedResponseStudentId(null);
     if (!activeSurveyId) {
       setStudents([]);
       setResponses([]);
@@ -178,6 +182,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             inviteKey: data.inviteKey,
             submittedByUid: data.submittedByUid,
             answers: data.answers || [],
+            peerRatings: data.peerRatings || [],
             teacherNote: data.teacherNote || '',
             createdAt: data.createdAt,
             updatedAt: data.updatedAt,
@@ -261,6 +266,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     });
   };
 
+  const handleViewStudentResponse = (studentId: string) => {
+    setFocusedResponseStudentId(studentId);
+    setActiveTab('analytics');
+  };
+
   const sidebarContent = (
     <div className="flex flex-col h-full">
       {/* Brand */}
@@ -327,7 +337,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           }`}
         >
           <BarChart3 className="w-4 h-4 shrink-0" />
-          관계 분석 · 행렬
+          학생 응답 · 분석
         </button>
       </div>
 
@@ -412,11 +422,18 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
 
           <button
             type="button"
-            onClick={() => onOpenStudentPortal('', '', false)}
+            onClick={() => {
+              setMobileMenuOpen(false);
+              if (activeSurvey) {
+                setShowShareModal(true);
+              } else {
+                onOpenStudentPortal('', '', false);
+              }
+            }}
             className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
           >
             <UserCheck className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-            학생 코드로 설문 참여
+            학생 전용 입장 창 공유
           </button>
         </div>
       </div>
@@ -553,11 +570,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
 
               <button
                 type="button"
-                onClick={() => onOpenStudentPortal(activeSurvey.joinCode, '', true)}
+                onClick={() => setShowShareModal(true)}
                 className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-700 rounded-lg hover:bg-blue-800 transition-colors whitespace-nowrap cursor-pointer"
               >
-                <MonitorPlay className="w-3.5 h-3.5" />
-                학생 응답 화면
+                <Share2 className="w-3.5 h-3.5" />
+                학생 입장 창 공유
               </button>
             </div>
           )}
@@ -631,6 +648,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   onSaveMemo={async (studentId, memo) => {
                     await runSafe(() => updateStudentMemo(activeSurvey.id, studentId, memo));
                   }}
+                  onViewStudentResponse={handleViewStudentResponse}
                 />
               )}
 
@@ -671,6 +689,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   onOpenStudentSurvey={(accessCode) =>
                     onOpenStudentPortal(activeSurvey.joinCode, accessCode, true)
                   }
+                  onViewStudentResponse={handleViewStudentResponse}
                 />
               )}
 
@@ -679,6 +698,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   survey={activeSurvey}
                   students={students}
                   responses={responses}
+                  initialSelectedStudentId={focusedResponseStudentId}
+                  onSaveMemo={async (studentId, memo) => {
+                    await runSafe(() => updateStudentMemo(activeSurvey.id, studentId, memo));
+                  }}
                 />
               )}
             </>
@@ -712,6 +735,17 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               updateSurveyDetails(activeSurvey, data, students, respondedIds)
             );
           }}
+        />
+      )}
+
+      {/* Student Entry Window Share Modal */}
+      {showShareModal && activeSurvey && (
+        <StudentShareModal
+          survey={activeSurvey}
+          totalStudents={students.length}
+          respondedCount={respondedIds.size}
+          onClose={() => setShowShareModal(false)}
+          onOpenKioskInCurrentTab={() => onOpenStudentPortal(activeSurvey.joinCode, '', true)}
         />
       )}
 

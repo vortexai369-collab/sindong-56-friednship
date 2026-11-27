@@ -15,8 +15,10 @@ import {
 import { auth, db, handleFirestoreError, OperationType } from '../firebase';
 import {
   ClassmateSummary,
+  ClosenessScore,
   DEFAULT_QUESTIONS,
   Gender,
+  PeerRating,
   SCHEMA_LIMITS,
   Student,
   Survey,
@@ -29,6 +31,7 @@ import {
 import {
   buildInviteKey,
   buildSampleClassSeed,
+  deriveAnswersFromPeerRatings,
   generateAccessCode,
   generateJoinCode,
   ParsedRosterRow,
@@ -613,22 +616,35 @@ export async function fetchInviteByCodes(
  */
 export async function submitStudentResponse(
   invite: SurveyInvite,
-  answers: SurveyAnswer[],
+  peerRatings: PeerRating[],
   teacherNote: string
 ): Promise<void> {
-  const uid = auth.currentUser?.uid;
-  if (!uid) throw new Error('로그인이 필요합니다.');
+  const verifiedUid = auth.currentUser?.emailVerified ? auth.currentUser.uid : null;
+  const submittedByUid = verifiedUid || `student_${invite.id}`;
 
   const path = `surveys/${invite.surveyId}/responses/${invite.studentDocId}`;
-  const isTeacherOwner = uid === invite.ownerId;
+  const isTeacherOwner = Boolean(verifiedUid && verifiedUid === invite.ownerId);
 
-  const cleanAnswers: SurveyAnswer[] = answers.slice(0, SCHEMA_LIMITS.MAX_QUESTIONS).map((a) => ({
-    questionId: clampString(a.questionId, 32),
-    category: a.category === 'negative' ? 'negative' : 'positive',
-    selectedIds: Array.from(new Set(a.selectedIds))
-      .filter((id) => id !== invite.studentDocId)
-      .slice(0, SCHEMA_LIMITS.MAX_SELECT_LIMIT),
-  }));
+  const cleanPeerRatings: PeerRating[] = peerRatings
+    .filter((r) => r.targetId && r.targetId !== invite.studentDocId)
+    .slice(0, SCHEMA_LIMITS.MAX_CLASSMATES)
+    .map((r) => {
+      const clampedScore = Math.max(-2, Math.min(2, Math.round(r.score))) as ClosenessScore;
+      return {
+        targetId: clampString(r.targetId, 128),
+        score: clampedScore,
+        tags: Array.from(new Set((r.tags || []).map((t) => clampString(t, 32)).filter(Boolean))).slice(
+          0,
+          SCHEMA_LIMITS.MAX_PEER_TAGS
+        ),
+        note: clampString(r.note || '', SCHEMA_LIMITS.PEER_NOTE_MAX),
+      };
+    });
+
+  const derivedAnswers: SurveyAnswer[] = deriveAnswersFromPeerRatings(
+    cleanPeerRatings,
+    invite.questions.map((q) => ({ id: q.id, category: q.category }))
+  );
 
   try {
     const batch = writeBatch(db);
@@ -641,8 +657,9 @@ export async function submitStudentResponse(
       studentDocId: invite.studentDocId,
       studentCode: clampString(invite.studentCode, SCHEMA_LIMITS.STUDENT_CODE_MAX),
       inviteKey: invite.id,
-      submittedByUid: uid,
-      answers: cleanAnswers,
+      submittedByUid,
+      answers: derivedAnswers,
+      peerRatings: cleanPeerRatings,
       teacherNote: clampString(teacherNote, SCHEMA_LIMITS.NOTE_MAX),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -743,6 +760,7 @@ export async function createSampleClassSurvey(ownerId: string): Promise<Survey> 
         inviteKey,
         submittedByUid: ownerId,
         answers: r.answers,
+        peerRatings: r.peerRatings,
         teacherNote: r.teacherNote,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),

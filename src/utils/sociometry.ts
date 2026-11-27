@@ -1,12 +1,19 @@
 import {
+  AsymmetricPair,
   ClassAnalytics,
+  ClosenessAnalyticsSummary,
+  ClosenessPairSummary,
+  ClosenessScore,
+  ClosenessScoreCounts,
   Gender,
+  PeerRating,
   SociogramEdge,
   SociometricType,
   Student,
   StudentMetrics,
   SurveyAnswer,
   SurveyResponse,
+  TagClosenessStat,
 } from '../types';
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -39,6 +46,72 @@ export function buildInviteKey(joinCode: string, accessCode: string): string {
   return `${sanitizeCode(joinCode)}_${sanitizeCode(accessCode)}`;
 }
 
+export function formatScoreLabel(score: ClosenessScore | undefined | null): string {
+  if (score === 2) return '매우 친함 (+2)';
+  if (score === 1) return '친한 편 (+1)';
+  if (score === 0) return '보통 (0)';
+  if (score === -1) return '어색함 (-1)';
+  if (score === -2) return '불편함 (-2)';
+  return '미평가';
+}
+
+/**
+ * Derives compatible summary `SurveyAnswer[]` from 1:1 `PeerRating[]`
+ * so legacy filters and summary queries work seamlessly alongside detailed ratings.
+ */
+export function deriveAnswersFromPeerRatings(
+  peerRatings: PeerRating[],
+  questionIds: Array<{ id: string; category: 'positive' | 'negative' }>
+): SurveyAnswer[] {
+  const veryCloseIds = peerRatings.filter((r) => r.score === 2).map((r) => r.targetId);
+  const collabOrFriendlyIds = peerRatings
+    .filter((r) => r.score >= 1 && (r.tags.includes('모둠협업') || r.score === 2))
+    .map((r) => r.targetId);
+  const trustIds = peerRatings
+    .filter((r) => r.score >= 1 && (r.tags.includes('도움·신뢰') || r.tags.includes('고민상담')))
+    .map((r) => r.targetId);
+  const allPosIds = peerRatings.filter((r) => r.score >= 1).map((r) => r.targetId);
+  const negIds = peerRatings.filter((r) => r.score <= -1).map((r) => r.targetId);
+
+  if (questionIds.length === 0) {
+    return [
+      { questionId: 'q1', category: 'positive', selectedIds: veryCloseIds },
+      { questionId: 'q2', category: 'positive', selectedIds: allPosIds },
+      { questionId: 'q4', category: 'negative', selectedIds: negIds },
+    ];
+  }
+
+  let posIndex = 0;
+  return questionIds.slice(0, 8).map((q) => {
+    if (q.category === 'negative') {
+      return { questionId: q.id, category: 'negative', selectedIds: negIds };
+    }
+    posIndex += 1;
+    if (posIndex === 1) {
+      return {
+        questionId: q.id,
+        category: 'positive',
+        selectedIds: veryCloseIds.length > 0 ? veryCloseIds : allPosIds,
+      };
+    }
+    if (posIndex === 2) {
+      return {
+        questionId: q.id,
+        category: 'positive',
+        selectedIds: collabOrFriendlyIds.length > 0 ? collabOrFriendlyIds : allPosIds,
+      };
+    }
+    if (posIndex === 3) {
+      return {
+        questionId: q.id,
+        category: 'positive',
+        selectedIds: trustIds.length > 0 ? trustIds : veryCloseIds,
+      };
+    }
+    return { questionId: q.id, category: 'positive', selectedIds: allPosIds };
+  });
+}
+
 export interface ParsedRosterRow {
   studentCode: string;
   number: number;
@@ -48,12 +121,10 @@ export interface ParsedRosterRow {
   status: '미응답' | '응답완료';
 }
 
-/**
- * Parses CSV or Google Sheets / Excel TSV pasted text supporting:
- * - Exact 7942 header: 학생ID,번호,이름,성별,코드,상태
- * - Compact roster: 번호,이름,성별 (auto-generates 학생ID and 코드)
- */
-export function parseRosterText(rawText: string, existingCodes: Set<string> = new Set()): ParsedRosterRow[] {
+export function parseRosterText(
+  rawText: string,
+  existingCodes: Set<string> = new Set()
+): ParsedRosterRow[] {
   const lines = rawText
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
@@ -68,7 +139,6 @@ export function parseRosterText(rawText: string, existingCodes: Set<string> = ne
     line.split(delimiter).map((cell) => cell.trim().replace(/^"|"$/g, ''))
   );
 
-  // Detect header row
   const firstRow = rows[0];
   const hasHeader = firstRow.some(
     (cell) =>
@@ -128,7 +198,6 @@ export function parseRosterText(rawText: string, existingCodes: Set<string> = ne
       if (idxAccessCode >= 0) codeRaw = cols[idxAccessCode] || '';
       if (idxStatus >= 0) statusRaw = cols[idxStatus] || '미응답';
     } else if (cols.length >= 4 && /^s?\d+/i.test(cols[0]) && /^\d+$/.test(cols[1])) {
-      // Matches 학생ID,번호,이름,성별,코드,상태 without header
       studentCode = cols[0];
       num = parseInt(cols[1], 10) || rowIdx + 1;
       name = cols[2] || '';
@@ -136,7 +205,6 @@ export function parseRosterText(rawText: string, existingCodes: Set<string> = ne
       codeRaw = cols[4] || '';
       statusRaw = cols[5] || '미응답';
     } else if (cols.length >= 2 && /^\d+$/.test(cols[0])) {
-      // 번호,이름,성별,코드
       num = parseInt(cols[0], 10) || rowIdx + 1;
       name = cols[1] || '';
       genderRaw = cols[2] || '남';
@@ -150,7 +218,9 @@ export function parseRosterText(rawText: string, existingCodes: Set<string> = ne
     if (!name) return;
 
     const gender: Gender =
-      genderRaw.includes('여') || genderRaw.toUpperCase() === 'F' || genderRaw.toUpperCase() === 'FEMALE'
+      genderRaw.includes('여') ||
+      genderRaw.toUpperCase() === 'F' ||
+      genderRaw.toUpperCase() === 'FEMALE'
         ? '여'
         : '남';
 
@@ -183,14 +253,7 @@ export function parseRosterText(rawText: string, existingCodes: Set<string> = ne
   return parsed.slice(0, 60);
 }
 
-/**
- * Exports roster strictly matching the attached Google Sheet columns:
- * 학생ID,번호,이름,성별,코드,상태
- */
-export function exportRosterToCsv(
-  students: Student[],
-  respondedIds: Set<string>
-): string {
+export function exportRosterToCsv(students: Student[], respondedIds: Set<string>): string {
   const header = '학생ID,번호,이름,성별,코드,상태';
   const sorted = [...students].sort((a, b) => a.number - b.number);
   const rows = sorted.map((s) => {
@@ -203,21 +266,27 @@ export function exportRosterToCsv(
 
 export function exportAnalyticsToCsv(analytics: ClassAnalytics): string {
   const header =
-    '학생ID,번호,이름,성별,응답상태,긍정지명받음,긍정지명함,상호친구수,갈등지명받음,교우관계유형,교사메모';
+    '학생ID,번호,이름,성별,응답상태,받은평균친밀도,준평균친밀도,받은+2,받은+1,받은0,받은-1,받은-2,상호단짝(+2),상호친구수,교우관계유형,교사메모';
   const rows = [...analytics.metricsList]
     .sort((a, b) => a.student.number - b.student.number)
     .map((m) => {
-      const esc = (v: string) => (v.includes(',') || v.includes('\n') ? `"${v.replace(/"/g, '""')}"` : v);
+      const esc = (v: string) =>
+        v.includes(',') || v.includes('\n') ? `"${v.replace(/"/g, '""')}"` : v;
       return [
         m.student.studentCode,
         m.student.number,
         esc(m.student.name),
         m.student.gender,
         m.responded ? '응답완료' : '미응답',
-        m.positiveIn,
-        m.positiveOut,
+        m.avgClosenessReceived !== null ? m.avgClosenessReceived.toFixed(2) : '',
+        m.avgClosenessGiven !== null ? m.avgClosenessGiven.toFixed(2) : '',
+        m.receivedScoreCounts[2],
+        m.receivedScoreCounts[1],
+        m.receivedScoreCounts[0],
+        m.receivedScoreCounts[-1],
+        m.receivedScoreCounts[-2],
+        m.bestFriendPairIds.length,
         m.mutualIds.length,
-        m.negativeIn,
         m.sociometricType,
         esc(m.student.memo || ''),
       ].join(',');
@@ -237,14 +306,19 @@ export function triggerCsvDownload(csvContent: string, filename: string) {
   URL.revokeObjectURL(url);
 }
 
+function emptyScoreCounts(): ClosenessScoreCounts {
+  return { '-2': 0, '-1': 0, '0': 0, '1': 0, '2': 0 };
+}
+
 /**
- * Computes complete classroom sociometry metrics, directed/mutual graph edges,
- * and Coie & Dodge sociometric status classifications.
+ * Computes complete classroom sociometry metrics & 5-level closeness analytics from 1:1 peerRatings
+ * (with fallback to legacy answers), including directed/mutual graph edges, Coie & Dodge classification,
+ * closeness distributions, given-vs-received profiles, pair tiers, tag intensity stats, and temperature gaps.
  */
 export function computeClassAnalytics(
   students: Student[],
   responses: SurveyResponse[],
-  filterQuestionId: string = 'all'
+  filterMode: string = 'all' // 'all' | 'score2' | 'score1' | 'score1plus' | 'scoreNeg1' | 'scoreNeg2' | 'negative' | specific questionId | tag:<tagName>
 ): ClassAnalytics {
   const sortedStudents = [...students].sort((a, b) => a.number - b.number);
   const studentIdSet = new Set(sortedStudents.map((s) => s.id));
@@ -255,57 +329,212 @@ export function computeClassAnalytics(
     }
   });
 
-  // Track directed edges
-  // key = `${fromId}__${toId}`
-  const posEdgeMap = new Map<string, { weight: number; questionIds: string[] }>();
-  const negEdgeMap = new Map<string, { weight: number; questionIds: string[] }>();
+  const posEdgeMap = new Map<
+    string,
+    { weight: number; maxScore: number; minScore: number; tags: string[]; questionIds: string[] }
+  >();
+  const negEdgeMap = new Map<
+    string,
+    { weight: number; maxScore: number; minScore: number; tags: string[]; questionIds: string[] }
+  >();
+
+  // Pairwise score matrix for closeness analytics & temperature-gap detection
+  const pairScoreMap = new Map<string, { score: ClosenessScore; tags: string[] }>();
 
   const chosenByPos: Record<string, Set<string>> = {};
   const chosePos: Record<string, Set<string>> = {};
   const posInTotalCount: Record<string, number> = {};
+  const veryCloseInCount: Record<string, number> = {};
   const chosenByNeg: Record<string, Set<string>> = {};
   const choseNeg: Record<string, Set<string>> = {};
+  const receivedScoreSum: Record<string, number> = {};
+  const receivedScoreCount: Record<string, number> = {};
+  const givenScoreSum: Record<string, number> = {};
+  const givenScoreCount: Record<string, number> = {};
+  const receivedCountsMap: Record<string, ClosenessScoreCounts> = {};
+  const givenCountsMap: Record<string, ClosenessScoreCounts> = {};
+  const posTagCounts: Record<string, Record<string, number>> = {};
+  const negTagCounts: Record<string, Record<string, number>> = {};
+
+  const classDistribution: ClosenessScoreCounts = emptyScoreCounts();
+  let totalRatingsCount = 0;
+  let totalRatingsSum = 0;
+  const globalTagStatsMap = new Map<string, TagClosenessStat>();
 
   sortedStudents.forEach((s) => {
     chosenByPos[s.id] = new Set();
     chosePos[s.id] = new Set();
     posInTotalCount[s.id] = 0;
+    veryCloseInCount[s.id] = 0;
     chosenByNeg[s.id] = new Set();
     choseNeg[s.id] = new Set();
+    receivedScoreSum[s.id] = 0;
+    receivedScoreCount[s.id] = 0;
+    givenScoreSum[s.id] = 0;
+    givenScoreCount[s.id] = 0;
+    receivedCountsMap[s.id] = emptyScoreCounts();
+    givenCountsMap[s.id] = emptyScoreCounts();
+    posTagCounts[s.id] = {};
+    negTagCounts[s.id] = {};
   });
 
+  const isTagFilter = filterMode.startsWith('tag:');
+  const targetTag = isTagFilter ? filterMode.slice(4) : '';
+
   responseMap.forEach((resp, fromId) => {
-    resp.answers.forEach((ans) => {
-      if (filterQuestionId !== 'all' && ans.questionId !== filterQuestionId) {
-        return;
-      }
-      const uniqueTargets = Array.from(new Set(ans.selectedIds)).filter(
-        (targetId) => targetId !== fromId && studentIdSet.has(targetId)
-      );
-      uniqueTargets.forEach((targetId) => {
-        const key = `${fromId}__${targetId}`;
-        if (ans.category === 'positive') {
-          chosePos[fromId].add(targetId);
-          chosenByPos[targetId].add(fromId);
-          posInTotalCount[targetId] += 1;
-          const prev = posEdgeMap.get(key) || { weight: 0, questionIds: [] };
-          prev.weight += 1;
-          if (!prev.questionIds.includes(ans.questionId)) {
-            prev.questionIds.push(ans.questionId);
+    const ratings = resp.peerRatings;
+    if (ratings && ratings.length > 0) {
+      ratings.forEach((r) => {
+        if (r.targetId === fromId || !studentIdSet.has(r.targetId)) return;
+        const key = `${fromId}__${r.targetId}`;
+
+        // Always record true pairwise scores & overall class/student closeness stats
+        pairScoreMap.set(key, { score: r.score, tags: r.tags || [] });
+        receivedScoreSum[r.targetId] += r.score;
+        receivedScoreCount[r.targetId] += 1;
+        givenScoreSum[fromId] += r.score;
+        givenScoreCount[fromId] += 1;
+        receivedCountsMap[r.targetId][r.score] += 1;
+        givenCountsMap[fromId][r.score] += 1;
+
+        classDistribution[r.score] += 1;
+        totalRatingsCount += 1;
+        totalRatingsSum += r.score;
+
+        if (r.score === 2) {
+          veryCloseInCount[r.targetId] += 1;
+        }
+        (r.tags || []).forEach((tag) => {
+          if (r.score >= 1) {
+            posTagCounts[r.targetId][tag] = (posTagCounts[r.targetId][tag] || 0) + 1;
+            const existing = globalTagStatsMap.get(`pos:${tag}`) || {
+              tag,
+              category: 'positive' as const,
+              totalCount: 0,
+              strongCount: 0,
+              mildCount: 0,
+            };
+            existing.totalCount += 1;
+            if (r.score === 2) existing.strongCount += 1;
+            else existing.mildCount += 1;
+            globalTagStatsMap.set(`pos:${tag}`, existing);
+          } else if (r.score <= -1) {
+            negTagCounts[r.targetId][tag] = (negTagCounts[r.targetId][tag] || 0) + 1;
+            const existing = globalTagStatsMap.get(`neg:${tag}`) || {
+              tag,
+              category: 'negative' as const,
+              totalCount: 0,
+              strongCount: 0,
+              mildCount: 0,
+            };
+            existing.totalCount += 1;
+            if (r.score === -2) existing.strongCount += 1;
+            else existing.mildCount += 1;
+            globalTagStatsMap.set(`neg:${tag}`, existing);
           }
-          posEdgeMap.set(key, prev);
-        } else {
-          choseNeg[fromId].add(targetId);
-          chosenByNeg[targetId].add(fromId);
-          const prev = negEdgeMap.get(key) || { weight: 0, questionIds: [] };
-          prev.weight += 1;
-          if (!prev.questionIds.includes(ans.questionId)) {
-            prev.questionIds.push(ans.questionId);
-          }
-          negEdgeMap.set(key, prev);
+        });
+
+        // Apply active filterMode to graph edges & degree metrics
+        if (isTagFilter && !(r.tags || []).includes(targetTag)) return;
+        if (filterMode === 'score2' && r.score !== 2) return;
+        if (filterMode === 'score1' && r.score !== 1) return;
+        if (filterMode === 'score1plus' && r.score < 1) return;
+        if (filterMode === 'scoreNeg1' && r.score !== -1) return;
+        if (filterMode === 'scoreNeg2' && r.score !== -2) return;
+        if (filterMode === 'negative' && r.score > -1) return;
+
+        if (r.score >= 1) {
+          chosePos[fromId].add(r.targetId);
+          chosenByPos[r.targetId].add(fromId);
+          posInTotalCount[r.targetId] += r.score;
+          posEdgeMap.set(key, {
+            weight: r.score,
+            maxScore: r.score,
+            minScore: r.score,
+            tags: r.tags || [],
+            questionIds: r.score === 2 ? ['q1'] : ['q2'],
+          });
+        } else if (r.score <= -1) {
+          choseNeg[fromId].add(r.targetId);
+          chosenByNeg[r.targetId].add(fromId);
+          negEdgeMap.set(key, {
+            weight: Math.abs(r.score),
+            maxScore: r.score,
+            minScore: r.score,
+            tags: r.tags || [],
+            questionIds: ['q4'],
+          });
         }
       });
-    });
+    } else {
+      // Fallback for legacy nomination-only responses
+      resp.answers.forEach((ans) => {
+        const isClosenessFilter =
+          filterMode === 'all' ||
+          filterMode === 'score2' ||
+          filterMode === 'score1' ||
+          filterMode === 'score1plus' ||
+          filterMode === 'scoreNeg1' ||
+          filterMode === 'scoreNeg2' ||
+          filterMode === 'negative';
+
+        if (!isClosenessFilter && !isTagFilter && ans.questionId !== filterMode) {
+          return;
+        }
+        if (
+          (filterMode === 'negative' || filterMode === 'scoreNeg1' || filterMode === 'scoreNeg2') &&
+          ans.category !== 'negative'
+        ) {
+          return;
+        }
+        if (
+          (filterMode === 'score2' || filterMode === 'score1' || filterMode === 'score1plus') &&
+          ans.category !== 'positive'
+        ) {
+          return;
+        }
+        if (isTagFilter) return;
+
+        const uniqueTargets = Array.from(new Set(ans.selectedIds)).filter(
+          (targetId) => targetId !== fromId && studentIdSet.has(targetId)
+        );
+        uniqueTargets.forEach((targetId) => {
+          const key = `${fromId}__${targetId}`;
+          if (ans.category === 'positive') {
+            chosePos[fromId].add(targetId);
+            chosenByPos[targetId].add(fromId);
+            posInTotalCount[targetId] += 1;
+            const prev = posEdgeMap.get(key) || {
+              weight: 0,
+              maxScore: 1,
+              minScore: 1,
+              tags: [],
+              questionIds: [],
+            };
+            prev.weight += 1;
+            if (!prev.questionIds.includes(ans.questionId)) {
+              prev.questionIds.push(ans.questionId);
+            }
+            posEdgeMap.set(key, prev);
+          } else {
+            choseNeg[fromId].add(targetId);
+            chosenByNeg[targetId].add(fromId);
+            const prev = negEdgeMap.get(key) || {
+              weight: 0,
+              maxScore: -1,
+              minScore: -1,
+              tags: [],
+              questionIds: [],
+            };
+            prev.weight += 1;
+            if (!prev.questionIds.includes(ans.questionId)) {
+              prev.questionIds.push(ans.questionId);
+            }
+            negEdgeMap.set(key, prev);
+          }
+        });
+      });
+    }
   });
 
   // Build graph edges combining mutual positive pairs
@@ -325,13 +554,15 @@ export function computeClassAnalytics(
       const pairKey = source < target ? `${source}__${target}` : `${target}__${source}`;
       if (!handledMutual.has(pairKey)) {
         handledMutual.add(pairKey);
-        const mergedQs = Array.from(new Set([...info.questionIds, ...reverse.questionIds]));
         edges.push({
           source,
           target,
           type: 'mutual',
           weight: info.weight + reverse.weight,
-          questionIds: mergedQs,
+          maxScore: Math.max(info.maxScore, reverse.maxScore),
+          minScore: Math.min(info.minScore, reverse.minScore),
+          tags: Array.from(new Set([...info.tags, ...reverse.tags])),
+          questionIds: Array.from(new Set([...info.questionIds, ...reverse.questionIds])),
         });
       }
     } else {
@@ -340,6 +571,9 @@ export function computeClassAnalytics(
         target,
         type: 'positive',
         weight: info.weight,
+        maxScore: info.maxScore,
+        minScore: info.minScore,
+        tags: info.tags,
         questionIds: info.questionIds,
       });
     }
@@ -352,9 +586,140 @@ export function computeClassAnalytics(
       target,
       type: 'negative',
       weight: info.weight,
+      maxScore: info.maxScore,
+      minScore: info.minScore,
+      tags: info.tags,
       questionIds: info.questionIds,
     });
   });
+
+  // Pairwise analysis: Asymmetric temperature gaps + Closeness Pair Tiers
+  const asymmetricPairs: AsymmetricPair[] = [];
+  const bestMutualPairs: ClosenessPairSummary[] = [];
+  const friendlyMutualPairs: ClosenessPairSummary[] = [];
+  const conflictPairs: ClosenessPairSummary[] = [];
+  const bestFriendsByStudent: Record<string, Set<string>> = {};
+  const mutualConflictsByStudent: Record<string, Set<string>> = {};
+
+  sortedStudents.forEach((s) => {
+    bestFriendsByStudent[s.id] = new Set();
+    mutualConflictsByStudent[s.id] = new Set();
+  });
+
+  const checkedPairs = new Set<string>();
+  pairScoreMap.forEach((valA, keyA) => {
+    const [fromId, toId] = keyA.split('__');
+    const pairKey = fromId < toId ? `${fromId}__${toId}` : `${toId}__${fromId}`;
+    if (checkedPairs.has(pairKey)) return;
+    checkedPairs.add(pairKey);
+
+    const valB = pairScoreMap.get(`${toId}__${fromId}`);
+    const combinedTags = Array.from(new Set([...valA.tags, ...(valB?.tags || [])]));
+
+    if (valB) {
+      // Mutual +2 best friends
+      if (valA.score === 2 && valB.score === 2) {
+        bestFriendsByStudent[fromId].add(toId);
+        bestFriendsByStudent[toId].add(fromId);
+        bestMutualPairs.push({
+          aId: fromId,
+          bId: toId,
+          scoreAB: valA.score,
+          scoreBA: valB.score,
+          tags: combinedTags,
+          category: 'best_mutual',
+        });
+      } else if (valA.score >= 1 && valB.score >= 1) {
+        friendlyMutualPairs.push({
+          aId: fromId,
+          bId: toId,
+          scoreAB: valA.score,
+          scoreBA: valB.score,
+          tags: combinedTags,
+          category: 'friendly_mutual',
+        });
+      } else if (valA.score <= -1 && valB.score <= -1) {
+        mutualConflictsByStudent[fromId].add(toId);
+        mutualConflictsByStudent[toId].add(fromId);
+        conflictPairs.push({
+          aId: fromId,
+          bId: toId,
+          scoreAB: valA.score,
+          scoreBA: valB.score,
+          tags: combinedTags,
+          category: 'mutual_conflict',
+        });
+      } else if (valA.score === -2 || valB.score === -2) {
+        const severeFromFirst = valA.score === -2;
+        conflictPairs.push({
+          aId: severeFromFirst ? fromId : toId,
+          bId: severeFromFirst ? toId : fromId,
+          scoreAB: severeFromFirst ? valA.score : valB.score,
+          scoreBA: severeFromFirst ? valB.score : valA.score,
+          tags: combinedTags,
+          category: 'severe_oneway_conflict',
+        });
+      }
+
+      // Asymmetric Temperature-Gap Detection (|score(A->B) - score(B->A)| >= 2)
+      const diff = valA.score - valB.score;
+      const gap = Math.abs(diff);
+      if (gap >= 2) {
+        if (diff > 0) {
+          asymmetricPairs.push({
+            fromId,
+            toId,
+            scoreFromTo: valA.score,
+            scoreToFrom: valB.score,
+            gap,
+            tagsFromTo: valA.tags,
+            tagsToFrom: valB.tags,
+          });
+        } else {
+          asymmetricPairs.push({
+            fromId: toId,
+            toId: fromId,
+            scoreFromTo: valB.score,
+            scoreToFrom: valA.score,
+            gap,
+            tagsFromTo: valB.tags,
+            tagsToFrom: valA.tags,
+          });
+        }
+      }
+    } else if (valA.score === -2) {
+      // One-way severe conflict where target has not responded yet
+      conflictPairs.push({
+        aId: fromId,
+        bId: toId,
+        scoreAB: valA.score,
+        scoreBA: null,
+        tags: valA.tags,
+        category: 'severe_oneway_conflict',
+      });
+    }
+  });
+
+  asymmetricPairs.sort((a, b) => b.gap - a.gap || b.scoreFromTo - a.scoreFromTo);
+  conflictPairs.sort((a, b) => {
+    const rank = (c: ClosenessPairSummary['category']) => (c === 'mutual_conflict' ? 2 : 1);
+    return rank(b.category) - rank(a.category) || (a.scoreAB + (a.scoreBA ?? 0)) - (b.scoreAB + (b.scoreBA ?? 0));
+  });
+
+  const tagStats = Array.from(globalTagStatsMap.values()).sort(
+    (a, b) => b.totalCount - a.totalCount || b.strongCount - a.strongCount
+  );
+
+  const closenessSummary: ClosenessAnalyticsSummary = {
+    totalRatingsCount,
+    classAvgCloseness:
+      totalRatingsCount > 0 ? Number((totalRatingsSum / totalRatingsCount).toFixed(2)) : null,
+    distribution: classDistribution,
+    bestMutualPairs,
+    friendlyMutualPairs,
+    conflictPairs,
+    tagStats,
+  };
 
   // Compute Z-scores for sociometric classification
   const n = sortedStudents.length;
@@ -383,6 +748,12 @@ export function computeClassAnalytics(
     미분류: 0,
   };
 
+  const sortTags = (obj: Record<string, number>) =>
+    Object.entries(obj)
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 4);
+
   const metricsById: Record<string, StudentMetrics> = {};
   const metricsList: StudentMetrics[] = [];
 
@@ -394,6 +765,18 @@ export function computeClassAnalytics(
     const mutualIds = Array.from(chosePos[student.id]).filter((id) =>
       chosenByPos[student.id].has(id)
     );
+    const avgClosenessReceived =
+      receivedScoreCount[student.id] > 0
+        ? Number((receivedScoreSum[student.id] / receivedScoreCount[student.id]).toFixed(2))
+        : null;
+    const avgClosenessGiven =
+      givenScoreCount[student.id] > 0
+        ? Number((givenScoreSum[student.id] / givenScoreCount[student.id]).toFixed(2))
+        : null;
+    const closenessGap =
+      avgClosenessReceived !== null && avgClosenessGiven !== null
+        ? Number((avgClosenessReceived - avgClosenessGiven).toFixed(2))
+        : null;
 
     let sociometricType: SociometricType = '미분류';
     if (respondedCount >= 3) {
@@ -402,7 +785,7 @@ export function computeClassAnalytics(
       const sp = zPos - zNeg;
       const si = zPos + zNeg;
 
-      if (negIn >= 2 && posIn <= 1) {
+      if (negIn >= 2 && (posIn <= 1 || (avgClosenessReceived !== null && avgClosenessReceived < -0.2))) {
         sociometricType = '갈등·주의형';
       } else if (posIn === 0 || (posIn === 1 && mutualIds.length === 0 && zPos < -0.7)) {
         sociometricType = '고립·관심형';
@@ -426,14 +809,24 @@ export function computeClassAnalytics(
       responded: responseMap.has(student.id),
       positiveIn: posIn,
       positiveInTotal: posInTotalCount[student.id],
+      veryCloseIn: veryCloseInCount[student.id],
       positiveOut: posOut,
       negativeIn: negIn,
       negativeOut: negOut,
+      avgClosenessReceived,
+      avgClosenessGiven,
+      closenessGap,
+      receivedScoreCounts: receivedCountsMap[student.id],
+      givenScoreCounts: givenCountsMap[student.id],
       mutualIds,
+      bestFriendPairIds: Array.from(bestFriendsByStudent[student.id]),
+      mutualConflictIds: Array.from(mutualConflictsByStudent[student.id]),
       chosenByPositive: Array.from(chosenByPos[student.id]),
       chosePositive: Array.from(chosePos[student.id]),
       chosenByNegative: Array.from(chosenByNeg[student.id]),
       choseNegative: Array.from(choseNeg[student.id]),
+      topPositiveTags: sortTags(posTagCounts[student.id]),
+      topNegativeTags: sortTags(negTagCounts[student.id]),
       sociometricType,
       teacherNote: responseMap.get(student.id)?.teacherNote || '',
     };
@@ -466,6 +859,8 @@ export function computeClassAnalytics(
       totalPositiveDirected > 0 ? Math.round((mutualDirectedCount / totalPositiveDirected) * 100) : 0,
     avgPositiveIn: n > 0 ? Number((posInArr.reduce((a, b) => a + b, 0) / n).toFixed(1)) : 0,
     attentionStudents,
+    asymmetricPairs,
+    closenessSummary,
     metricsById,
     metricsList,
     edges,
@@ -490,9 +885,6 @@ const CLUSTER_COLORS = [
   '#4F46E5',
 ];
 
-/**
- * Finds connected peer subgroups (cliques/components) based on mutual positive selections.
- */
 export function detectFriendClusters(analytics: ClassAnalytics): FriendCluster[] {
   const visited = new Set<string>();
   const clusters: FriendCluster[] = [];
@@ -557,14 +949,14 @@ export interface SampleClassSeed {
   responses: Array<{
     studentDocId: string;
     answers: SurveyAnswer[];
+    peerRatings: PeerRating[];
     teacherNote: string;
   }>;
 }
 
 /**
- * Generates a realistic 16-student Korean 5th-grade classroom dataset
- * so teachers can immediately inspect sociogram clusters, mutual pairs,
- * bridge students, isolated students, and conflict links.
+ * Generates a realistic 16-student Korean classroom dataset with full 1:1 5-level closeness ratings,
+ * conditional relationship tags, per-friend private notes, and realistic temperature gaps.
  */
 export function buildSampleClassSeed(): SampleClassSeed {
   const roster: SampleClassSeed['students'] = [
@@ -586,149 +978,188 @@ export function buildSampleClassSeed(): SampleClassSeed {
     { docId: 'stu_16', studentCode: 'S16', number: 16, name: '윤채원', gender: '여', accessCode: 'W4Z9Y', memo: '' },
   ];
 
-  // 14 of 16 responded (stu_08 and stu_16 are still 미응답 so the teacher can test student survey mode!)
-  const responses: SampleClassSeed['responses'] = [
+  const allIds = roster.map((r) => r.docId);
+
+  const buildRatings = (
+    selfId: string,
+    overrides: Record<string, { score: ClosenessScore; tags?: string[]; note?: string }>
+  ): PeerRating[] =>
+    allIds
+      .filter((id) => id !== selfId)
+      .map((targetId) => {
+        const ov = overrides[targetId];
+        return {
+          targetId,
+          score: ov ? ov.score : 0,
+          tags: ov?.tags || [],
+          note: ov?.note || '',
+        };
+      });
+
+  const rawConfigs: Array<{
+    studentDocId: string;
+    overrides: Record<string, { score: ClosenessScore; tags?: string[]; note?: string }>;
+    teacherNote: string;
+  }> = [
     {
       studentDocId: 'stu_01',
-      answers: [
-        { questionId: 'q1', category: 'positive', selectedIds: ['stu_02', 'stu_03', 'stu_09'] },
-        { questionId: 'q2', category: 'positive', selectedIds: ['stu_02', 'stu_05', 'stu_09'] },
-        { questionId: 'q3', category: 'positive', selectedIds: ['stu_02', 'stu_09'] },
-        { questionId: 'q4', category: 'negative', selectedIds: ['stu_06'] },
-      ],
+      overrides: {
+        stu_02: { score: 2, tags: ['고민상담', '쉬는시간·놀이', '도움·신뢰'] },
+        stu_03: { score: 2, tags: ['쉬는시간·놀이', '성격이 잘 맞음'] },
+        stu_05: { score: 1, tags: ['모둠협업'] },
+        stu_09: { score: 2, tags: ['모둠협업', '도움·신뢰'] },
+        stu_06: { score: -2, tags: ['규칙·협업 갈등', '다툼 경험'], note: '피구 경기 규칙 때문에 자주 언성이 높아져요' },
+      },
       teacherNote: '요즘 반 분위기가 좋아서 즐겁습니다. 체육 시간에 다투지 않고 즐겁게 경기했으면 좋겠어요.',
     },
     {
       studentDocId: 'stu_02',
-      answers: [
-        { questionId: 'q1', category: 'positive', selectedIds: ['stu_01', 'stu_03', 'stu_05'] },
-        { questionId: 'q2', category: 'positive', selectedIds: ['stu_01', 'stu_03'] },
-        { questionId: 'q3', category: 'positive', selectedIds: ['stu_01', 'stu_05'] },
-        { questionId: 'q4', category: 'negative', selectedIds: ['stu_06'] },
-      ],
+      overrides: {
+        stu_01: { score: 2, tags: ['고민상담', '도움·신뢰'] },
+        stu_03: { score: 2, tags: ['쉬는시간·놀이', '같이 있으면 편함'] },
+        stu_05: { score: 1, tags: ['모둠협업', '쉬는시간·놀이'] },
+        stu_06: { score: -2, tags: ['말투·장난이 힘듦', '다툼 경험'] },
+      },
       teacherNote: '',
     },
     {
       studentDocId: 'stu_03',
-      answers: [
-        { questionId: 'q1', category: 'positive', selectedIds: ['stu_01', 'stu_02', 'stu_07'] },
-        { questionId: 'q2', category: 'positive', selectedIds: ['stu_01', 'stu_07'] },
-        { questionId: 'q3', category: 'positive', selectedIds: ['stu_01', 'stu_02'] },
-        { questionId: 'q4', category: 'negative', selectedIds: [] },
-      ],
+      overrides: {
+        stu_01: { score: 2, tags: ['쉬는시간·놀이', '도움·신뢰'] },
+        stu_02: { score: 2, tags: ['성격이 잘 맞음', '같이 있으면 편함'] },
+        stu_07: { score: 1, tags: ['쉬는시간·놀이'] },
+        stu_04: { score: -1, tags: ['다가가기 어려움'] },
+      },
       teacherNote: '',
     },
     {
       studentDocId: 'stu_04',
-      answers: [
-        { questionId: 'q1', category: 'positive', selectedIds: ['stu_01', 'stu_09'] },
-        { questionId: 'q2', category: 'positive', selectedIds: ['stu_01', 'stu_05'] },
-        { questionId: 'q3', category: 'positive', selectedIds: ['stu_09'] },
-        { questionId: 'q4', category: 'negative', selectedIds: [] },
-      ],
+      overrides: {
+        stu_01: { score: 2, tags: ['도움·신뢰', '같이 있으면 편함'], note: '전학 왔을 때 교실 안내해 줘서 고마웠어요' },
+        stu_09: { score: 2, tags: ['도움·신뢰', '모둠협업'] },
+        stu_05: { score: 1, tags: ['모둠협업'] },
+        stu_06: { score: -1, tags: ['말투·장난이 힘듦'] },
+      },
       teacherNote: '전학 온 지 얼마 안 돼서 아직 친한 친구가 많지 않아요. 도윤이랑 서연이가 잘 챙겨줘서 고마워요.',
     },
     {
       studentDocId: 'stu_05',
-      answers: [
-        { questionId: 'q1', category: 'positive', selectedIds: ['stu_02', 'stu_07', 'stu_08'] },
-        { questionId: 'q2', category: 'positive', selectedIds: ['stu_01', 'stu_07'] },
-        { questionId: 'q3', category: 'positive', selectedIds: ['stu_01', 'stu_02'] },
-        { questionId: 'q4', category: 'negative', selectedIds: ['stu_06'] },
-      ],
+      overrides: {
+        stu_01: { score: 1, tags: ['모둠협업', '도움·신뢰'] },
+        stu_02: { score: 2, tags: ['쉬는시간·놀이', '성격이 잘 맞음'] },
+        stu_07: { score: 2, tags: ['쉬는시간·놀이', '같이 있으면 편함'] },
+        stu_08: { score: 1, tags: ['쉬는시간·놀이'] },
+        stu_06: { score: -2, tags: ['규칙·협업 갈등', '말투·장난이 힘듦'] },
+      },
       teacherNote: '',
     },
     {
       studentDocId: 'stu_06',
-      answers: [
-        { questionId: 'q1', category: 'positive', selectedIds: ['stu_07', 'stu_08'] },
-        { questionId: 'q2', category: 'positive', selectedIds: ['stu_07', 'stu_03'] },
-        { questionId: 'q3', category: 'positive', selectedIds: ['stu_01'] },
-        { questionId: 'q4', category: 'negative', selectedIds: ['stu_02', 'stu_05'] },
-      ],
+      overrides: {
+        stu_07: { score: 2, tags: ['쉬는시간·놀이', '같이 있으면 편함'] },
+        stu_08: { score: 1, tags: ['쉬는시간·놀이'] },
+        stu_01: { score: 1, tags: ['도움·신뢰'] },
+        stu_02: { score: -2, tags: ['다툼 경험', '소외·무시 느낌'], note: '피구할 때 계속 저한테만 뭐라고 해요' },
+        stu_05: { score: -2, tags: ['다툼 경험', '규칙·협업 갈등'] },
+      },
       teacherNote: '피구할 때 애들이 저한테만 뭐라고 해서 속상했어요.',
     },
     {
       studentDocId: 'stu_07',
-      answers: [
-        { questionId: 'q1', category: 'positive', selectedIds: ['stu_03', 'stu_05', 'stu_06'] },
-        { questionId: 'q2', category: 'positive', selectedIds: ['stu_03', 'stu_05'] },
-        { questionId: 'q3', category: 'positive', selectedIds: ['stu_03', 'stu_01'] },
-        { questionId: 'q4', category: 'negative', selectedIds: [] },
-      ],
+      overrides: {
+        stu_03: { score: 2, tags: ['쉬는시간·놀이', '성격이 잘 맞음'] },
+        stu_05: { score: 2, tags: ['고민상담', '쉬는시간·놀이'] },
+        stu_06: { score: 1, tags: ['쉬는시간·놀이'], note: '둘이 있을 땐 착한데 경기할 때만 흥분해요' },
+        stu_01: { score: 1, tags: ['도움·신뢰'] },
+      },
       teacherNote: '',
     },
     {
       studentDocId: 'stu_09',
-      answers: [
-        { questionId: 'q1', category: 'positive', selectedIds: ['stu_10', 'stu_11', 'stu_01'] },
-        { questionId: 'q2', category: 'positive', selectedIds: ['stu_10', 'stu_12', 'stu_01'] },
-        { questionId: 'q3', category: 'positive', selectedIds: ['stu_10', 'stu_11'] },
-        { questionId: 'q4', category: 'negative', selectedIds: [] },
-      ],
+      overrides: {
+        stu_10: { score: 2, tags: ['고민상담', '같이 있으면 편함'] },
+        stu_11: { score: 2, tags: ['쉬는시간·놀이', '도움·신뢰'] },
+        stu_01: { score: 2, tags: ['모둠협업', '도움·신뢰'] },
+        stu_12: { score: 1, tags: ['모둠협업'] },
+        stu_04: { score: 1, tags: ['모둠협업'] },
+      },
       teacherNote: '다음 모둠 활동 때는 은우랑 같은 모둠 해보고 싶어요.',
     },
     {
       studentDocId: 'stu_10',
-      answers: [
-        { questionId: 'q1', category: 'positive', selectedIds: ['stu_09', 'stu_11', 'stu_12'] },
-        { questionId: 'q2', category: 'positive', selectedIds: ['stu_09', 'stu_11'] },
-        { questionId: 'q3', category: 'positive', selectedIds: ['stu_09', 'stu_12'] },
-        { questionId: 'q4', category: 'negative', selectedIds: [] },
-      ],
+      overrides: {
+        stu_09: { score: 2, tags: ['고민상담', '도움·신뢰'] },
+        stu_11: { score: 2, tags: ['쉬는시간·놀이', '성격이 잘 맞음'] },
+        stu_12: { score: 1, tags: ['모둠협업', '같이 있으면 편함'] },
+      },
       teacherNote: '',
     },
     {
       studentDocId: 'stu_11',
-      answers: [
-        { questionId: 'q1', category: 'positive', selectedIds: ['stu_09', 'stu_10', 'stu_13'] },
-        { questionId: 'q2', category: 'positive', selectedIds: ['stu_10', 'stu_13'] },
-        { questionId: 'q3', category: 'positive', selectedIds: ['stu_09', 'stu_10'] },
-        { questionId: 'q4', category: 'negative', selectedIds: ['stu_06'] },
-      ],
+      overrides: {
+        stu_09: { score: 2, tags: ['고민상담', '도움·신뢰'] },
+        stu_10: { score: 2, tags: ['쉬는시간·놀이', '같이 있으면 편함'] },
+        stu_13: { score: 1, tags: ['모둠협업'] },
+        stu_06: { score: -1, tags: ['말투·장난이 힘듦'] },
+      },
       teacherNote: '',
     },
     {
       studentDocId: 'stu_12',
-      answers: [
-        { questionId: 'q1', category: 'positive', selectedIds: ['stu_10', 'stu_13', 'stu_14'] },
-        { questionId: 'q2', category: 'positive', selectedIds: ['stu_09', 'stu_14'] },
-        { questionId: 'q3', category: 'positive', selectedIds: ['stu_10', 'stu_13'] },
-        { questionId: 'q4', category: 'negative', selectedIds: [] },
-      ],
+      overrides: {
+        stu_10: { score: 2, tags: ['고민상담', '같이 있으면 편함'] },
+        stu_13: { score: 2, tags: ['모둠협업', '도움·신뢰'] },
+        stu_14: { score: 2, tags: ['쉬는시간·놀이', '성격이 잘 맞음'] },
+        stu_09: { score: 1, tags: ['모둠협업'] },
+      },
       teacherNote: '',
     },
     {
       studentDocId: 'stu_13',
-      answers: [
-        { questionId: 'q1', category: 'positive', selectedIds: ['stu_11', 'stu_12', 'stu_14'] },
-        { questionId: 'q2', category: 'positive', selectedIds: ['stu_12', 'stu_14'] },
-        { questionId: 'q3', category: 'positive', selectedIds: ['stu_12', 'stu_11'] },
-        { questionId: 'q4', category: 'negative', selectedIds: [] },
-      ],
+      overrides: {
+        stu_12: { score: 2, tags: ['고민상담', '모둠협업'] },
+        stu_14: { score: 2, tags: ['쉬는시간·놀이', '같이 있으면 편함'] },
+        stu_11: { score: 1, tags: ['도움·신뢰'] },
+      },
       teacherNote: '',
     },
     {
       studentDocId: 'stu_14',
-      answers: [
-        { questionId: 'q1', category: 'positive', selectedIds: ['stu_12', 'stu_13', 'stu_15'] },
-        { questionId: 'q2', category: 'positive', selectedIds: ['stu_12', 'stu_15'] },
-        { questionId: 'q3', category: 'positive', selectedIds: ['stu_13', 'stu_12'] },
-        { questionId: 'q4', category: 'negative', selectedIds: [] },
-      ],
+      overrides: {
+        stu_12: { score: 2, tags: ['쉬는시간·놀이', '성격이 잘 맞음'] },
+        stu_13: { score: 2, tags: ['고민상담', '도움·신뢰'] },
+        stu_15: { score: 2, tags: ['같이 있으면 편함', '모둠협업'] },
+      },
       teacherNote: '',
     },
     {
       studentDocId: 'stu_15',
-      answers: [
-        { questionId: 'q1', category: 'positive', selectedIds: ['stu_14', 'stu_16'] },
-        { questionId: 'q2', category: 'positive', selectedIds: ['stu_14', 'stu_09'] },
-        { questionId: 'q3', category: 'positive', selectedIds: ['stu_14'] },
-        { questionId: 'q4', category: 'negative', selectedIds: [] },
-      ],
+      overrides: {
+        stu_14: { score: 2, tags: ['고민상담', '같이 있으면 편함', '도움·신뢰'] },
+        stu_16: { score: 1, tags: ['같이 있으면 편함'] },
+        stu_09: { score: 1, tags: ['모둠협업'] },
+      },
       teacherNote: '하은이랑 짝이 되어서 편해요.',
     },
   ];
+
+  const defaultQMeta = [
+    { id: 'q1', category: 'positive' as const },
+    { id: 'q2', category: 'positive' as const },
+    { id: 'q3', category: 'positive' as const },
+    { id: 'q4', category: 'negative' as const },
+  ];
+
+  const responses: SampleClassSeed['responses'] = rawConfigs.map((cfg) => {
+    const peerRatings = buildRatings(cfg.studentDocId, cfg.overrides);
+    const answers = deriveAnswersFromPeerRatings(peerRatings, defaultQMeta);
+    return {
+      studentDocId: cfg.studentDocId,
+      answers,
+      peerRatings,
+      teacherNote: cfg.teacherNote,
+    };
+  });
 
   return { students: roster, responses };
 }

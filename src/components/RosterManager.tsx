@@ -21,6 +21,7 @@ import {
   parseRosterText,
   triggerCsvDownload,
 } from '../utils/sociometry';
+import { buildStudentEntryUrl } from './StudentShareModal';
 
 interface RosterManagerProps {
   survey: Survey;
@@ -47,6 +48,7 @@ interface RosterManagerProps {
   onResetResponse: (student: Student) => Promise<void>;
   onBulkImport: (rows: ParsedRosterRow[], replaceExisting: boolean) => Promise<void>;
   onOpenStudentSurvey: (accessCode: string) => void;
+  onViewStudentResponse?: (studentId: string) => void;
 }
 
 export const RosterManager: React.FC<RosterManagerProps> = ({
@@ -59,6 +61,7 @@ export const RosterManager: React.FC<RosterManagerProps> = ({
   onResetResponse,
   onBulkImport,
   onOpenStudentSurvey,
+  onViewStudentResponse,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | '응답완료' | '미응답'>('all');
@@ -173,9 +176,7 @@ export const RosterManager: React.FC<RosterManagerProps> = ({
   };
 
   const handleCopyStudentLink = async (student: Student) => {
-    const url = `${window.location.origin}${window.location.pathname}?join=${encodeURIComponent(
-      survey.joinCode
-    )}&code=${encodeURIComponent(student.accessCode)}`;
+    const url = buildStudentEntryUrl(survey.joinCode, student.accessCode);
     try {
       await navigator.clipboard.writeText(url);
       setCopiedId(student.id);
@@ -372,11 +373,20 @@ export const RosterManager: React.FC<RosterManagerProps> = ({
                       </td>
                       <td className="py-2 px-4 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-2">
+                          {isDone && onViewStudentResponse && (
+                            <button
+                              type="button"
+                              onClick={() => onViewStudentResponse(s.id)}
+                              className="text-xs font-medium text-blue-700 hover:text-blue-900 whitespace-nowrap cursor-pointer"
+                            >
+                              응답 보기
+                            </button>
+                          )}
                           {!isDone && survey.status === 'open' && (
                             <button
                               type="button"
                               onClick={() => onOpenStudentSurvey(s.accessCode)}
-                              className="text-xs font-medium text-blue-700 hover:text-blue-900 cursor-pointer"
+                              className="text-xs font-medium text-blue-700 hover:text-blue-900 whitespace-nowrap cursor-pointer"
                             >
                               설문 열기
                             </button>
@@ -710,6 +720,15 @@ export const RosterManager: React.FC<RosterManagerProps> = ({
                   닫기
                 </button>
               </div>
+            </div>
+
+            <div className="mb-5 p-3.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-700 space-y-1">
+              <p className="font-semibold text-slate-900">
+                학생 전용 설문 입장 주소 (Google 로그인 불필요)
+              </p>
+              <p className="font-mono text-blue-700 break-all">
+                {buildStudentEntryUrl(survey.joinCode)}
+              </p>
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">

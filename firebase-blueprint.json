@@ -324,7 +324,11 @@
         },
         "answers": {
           "type": "array",
-          "description": "Bounded list (1 to 8) of question answer objects."
+          "description": "Bounded list (1 to 8) of derived question answer objects."
+        },
+        "peerRatings": {
+          "type": "array",
+          "description": "Bounded list (0 to 60) of 1:1 per-classmate closeness ratings (-2 to +2), relationship tags, and optional private notes."
         },
         "teacherNote": {
           "type": "string",

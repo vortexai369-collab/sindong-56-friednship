@@ -22,6 +22,10 @@ service cloud.firestore {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidInviteKey(key) {
+      return key is string && key.size() >= 9 && key.size() <= 33 && key.matches('^[A-Z0-9]{4,16}_[A-Z0-9]{4,16}$');
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -82,11 +86,34 @@ service cloud.firestore {
         listVal[0].questionId.size() <= 32 &&
         listVal[0].category in ['positive', 'negative'] &&
         listVal[0].selectedIds is list &&
-        listVal[0].selectedIds.size() <= 10 &&
+        listVal[0].selectedIds.size() <= 60 &&
         (listVal[0].selectedIds.size() == 0 || (
           listVal[0].selectedIds[0] is string &&
           listVal[0].selectedIds[0].size() >= 1 &&
           listVal[0].selectedIds[0].size() <= 128
+        ));
+    }
+
+    function isValidPeerRatingList(listVal) {
+      return listVal is list &&
+        listVal.size() <= 60 &&
+        (listVal.size() == 0 || (
+          listVal[0] is map &&
+          listVal[0].targetId is string &&
+          listVal[0].targetId.size() >= 1 &&
+          listVal[0].targetId.size() <= 128 &&
+          listVal[0].score is int &&
+          listVal[0].score >= -2 &&
+          listVal[0].score <= 2 &&
+          listVal[0].tags is list &&
+          listVal[0].tags.size() <= 6 &&
+          (listVal[0].tags.size() == 0 || (
+            listVal[0].tags[0] is string &&
+            listVal[0].tags[0].size() >= 1 &&
+            listVal[0].tags[0].size() <= 32
+          )) &&
+          listVal[0].note is string &&
+          listVal[0].note.size() <= 200
         ));
     }
 
@@ -199,12 +226,11 @@ service cloud.firestore {
         data.studentCode.size() >= 1 &&
         data.studentCode.size() <= 32 &&
         data.inviteKey is string &&
-        data.inviteKey.size() >= 5 &&
-        data.inviteKey.size() <= 64 &&
-        data.inviteKey.matches('^[a-zA-Z0-9_\\-]+$') &&
+        isValidInviteKey(data.inviteKey) &&
         data.submittedByUid is string &&
         isValidId(data.submittedByUid) &&
         isValidAnswerList(data.answers) &&
+        (!('peerRatings' in data) || isValidPeerRatingList(data.peerRatings)) &&
         data.teacherNote is string &&
         data.teacherNote.size() <= 1000 &&
         data.createdAt is timestamp &&
@@ -320,20 +346,27 @@ service cloud.firestore {
           isSurveyOwner(surveyId);
         allow list: if isVerifiedUser() &&
           existing().ownerId == request.auth.uid;
-        allow create: if isVerifiedUser() &&
-          isValidId(surveyId) &&
+        allow create: if isValidId(surveyId) &&
           isValidId(studentDocId) &&
           isValidResponse(incoming(), surveyId, studentDocId) &&
-          incoming().submittedByUid == request.auth.uid &&
           incoming().keys().hasAll(['ownerId', 'surveyId', 'studentDocId', 'studentCode', 'inviteKey', 'submittedByUid', 'answers', 'teacherNote', 'createdAt', 'updatedAt']) &&
-          incoming().keys().hasOnly(['ownerId', 'surveyId', 'studentDocId', 'studentCode', 'inviteKey', 'submittedByUid', 'answers', 'teacherNote', 'createdAt', 'updatedAt']) &&
+          incoming().keys().hasOnly(['ownerId', 'surveyId', 'studentDocId', 'studentCode', 'inviteKey', 'submittedByUid', 'answers', 'peerRatings', 'teacherNote', 'createdAt', 'updatedAt']) &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time &&
           (
             // Tier 1: Owning teacher creating sample or kiosk response
-            (incoming().ownerId == request.auth.uid && isSurveyOwner(surveyId)) ||
-            // Tier 2: Verified student submitting via valid open invite atomically
             (
+              isVerifiedUser() &&
+              incoming().submittedByUid == request.auth.uid &&
+              incoming().ownerId == request.auth.uid &&
+              isSurveyOwner(surveyId)
+            ) ||
+            // Tier 2: Student submitting via exact capability-keyed open invite atomically
+            (
+              (
+                incoming().submittedByUid == ('student_' + incoming().inviteKey) ||
+                (isVerifiedUser() && incoming().submittedByUid == request.auth.uid)
+              ) &&
               exists(/databases/$(database)/documents/surveyInvites/$(incoming().inviteKey)) &&
               get(/databases/$(database)/documents/surveyInvites/$(incoming().inviteKey)).data.surveyId == surveyId &&
               get(/databases/$(database)/documents/surveyInvites/$(incoming().inviteKey)).data.studentDocId == studentDocId &&
@@ -354,7 +387,7 @@ service cloud.firestore {
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
           isSurveyOwner(surveyId) &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['answers', 'teacherNote', 'updatedAt']);
+          incoming().diff(existing()).affectedKeys().hasOnly(['answers', 'peerRatings', 'teacherNote', 'updatedAt']);
         allow delete: if isVerifiedUser() &&
           isValidId(surveyId) &&
           isValidId(studentDocId) &&
@@ -367,10 +400,12 @@ service cloud.firestore {
     // Collection 3: /surveyInvites/{inviteKey}
     // -------------------------------------------------------------------------
     match /surveyInvites/{inviteKey} {
-      allow get: if isVerifiedUser() && isValidId(inviteKey);
+      // Single-document capability-key lookup only (no list enumeration allowed)
+      allow get: if isValidId(inviteKey) && isValidInviteKey(inviteKey);
       allow list: if isVerifiedUser() && existing().ownerId == request.auth.uid;
       allow create: if isVerifiedUser() &&
         isValidId(inviteKey) &&
+        isValidInviteKey(inviteKey) &&
         isValidInvite(incoming()) &&
         incoming().ownerId == request.auth.uid &&
         incoming().keys().hasAll(['ownerId', 'surveyId', 'studentDocId', 'studentCode', 'studentNumber', 'studentName', 'surveyTitle', 'className', 'surveyStatus', 'allowTeacherNote', 'questions', 'classmates', 'submitted', 'createdAt', 'updatedAt']) &&
@@ -378,8 +413,8 @@ service cloud.firestore {
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         isSurveyOwner(incoming().surveyId);
-      allow update: if isVerifiedUser() &&
-        isValidId(inviteKey) &&
+      allow update: if isValidId(inviteKey) &&
+        isValidInviteKey(inviteKey) &&
         isValidInvite(incoming()) &&
         incoming().ownerId == existing().ownerId &&
         incoming().surveyId == existing().surveyId &&
@@ -389,6 +424,7 @@ service cloud.firestore {
         (
           // Tier 1: Owning teacher syncing roster/questions/resetting submission
           (
+            isVerifiedUser() &&
             existing().ownerId == request.auth.uid &&
             isSurveyOwner(existing().surveyId) &&
             incoming().diff(existing()).affectedKeys().hasOnly(['studentCode', 'studentNumber', 'studentName', 'surveyTitle', 'className', 'surveyStatus', 'allowTeacherNote', 'questions', 'classmates', 'submitted', 'updatedAt'])

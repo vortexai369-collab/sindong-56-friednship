@@ -1,13 +1,22 @@
 import React, { useState } from 'react';
-import { ArrowRight, Check, ExternalLink, FileSpreadsheet, Lock, Network, Users } from 'lucide-react';
+import {
+  ArrowRight,
+  Check,
+  ExternalLink,
+  FileSpreadsheet,
+  Lock,
+  Network,
+  UserCheck,
+  Users,
+} from 'lucide-react';
 import type { AuthErrorState } from '../App';
 
 interface LandingPageProps {
   onSignIn: () => Promise<void>;
   onSignInRedirect: () => Promise<void>;
+  onOpenStudentEntry: () => void;
   authError: AuthErrorState | null;
   signingIn: boolean;
-  hasStudentDeepLink: boolean;
 }
 
 const PREVIEW_NODES = [
@@ -35,9 +44,9 @@ const PREVIEW_EDGES = [
 export const LandingPage: React.FC<LandingPageProps> = ({
   onSignIn,
   onSignInRedirect,
+  onOpenStudentEntry,
   authError,
   signingIn,
-  hasStudentDeepLink,
 }) => {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const isEmbeddedIframe =
@@ -82,14 +91,22 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             </a>
           </nav>
 
-          <div className="shrink-0">
+          <div className="flex items-center gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={onOpenStudentEntry}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <UserCheck className="w-4 h-4 text-emerald-700" />
+              학생 설문 입장
+            </button>
             <button
               type="button"
               onClick={onSignIn}
               disabled={signingIn}
               className="px-4 py-2 text-sm font-medium text-white bg-blue-700 rounded-lg hover:bg-blue-800 disabled:opacity-60 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              {signingIn ? '로그인 창 여는 중...' : 'Google로 시작하기'}
+              {signingIn ? '로그인 창 여는 중...' : '교사 로그인'}
             </button>
           </div>
         </div>
@@ -145,20 +162,6 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
         {/* Hero Split */}
         <section className="max-w-6xl mx-auto px-6 pt-14 pb-16 lg:pt-20 lg:pb-20">
-          {hasStudentDeepLink && (
-            <div className="mb-8 px-4 py-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-900 flex flex-wrap items-center justify-between gap-3">
-              <span>학생 교우관계 조사 초대 링크로 접속했습니다. Google 계정으로 로그인하면 설문 화면으로 바로 이동합니다.</span>
-              <button
-                type="button"
-                onClick={onSignIn}
-                disabled={signingIn}
-                className="text-sm font-semibold text-blue-700 hover:text-blue-900 underline whitespace-nowrap cursor-pointer"
-              >
-                Google 로그인하고 응답하기
-              </button>
-            </div>
-          )}
-
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-stretch">
             <div className="lg:col-span-6 flex flex-col justify-center space-y-6">
               <p className="text-sm font-medium text-blue-700">
@@ -168,12 +171,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 시트 명단 붙여넣기부터 교우관계망 분석까지 한 화면에서
               </h1>
               <p className="text-base text-slate-600 leading-relaxed max-w-xl">
-                구글 시트의 학생 명단(학생ID, 번호, 이름, 성별, 코드, 상태)을 그대로 불러와
-                학생 개별 접속 코드를 발급하고, 실시간 응답 현황과 소시오그램·관계 행렬을 즉시
-                확인하세요.
+                교사는 Google 계정으로 학급 명단을 관리하고, 학생은 별도의 로그인 없이 전용 입장
+                창에서 학급 코드와 개인 코드만으로 안전하게 응답합니다.
               </p>
 
-              <div className="flex flex-wrap items-center gap-4 pt-1">
+              <div className="flex flex-wrap items-center gap-3 pt-1">
                 <button
                   type="button"
                   onClick={onSignIn}
@@ -198,10 +200,21 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                       d="M12 24c3.24 0 5.95-1.07 7.93-2.91l-3.72-2.89c-1.07.72-2.45 1.15-4.21 1.15-3.08 0-5.69-1.82-6.66-4.71L1.28 17.4C3.25 21.31 7.31 24 12 24z"
                     />
                   </svg>
-                  {signingIn ? 'Google 로그인 창 여는 중...' : 'Google 계정으로 시작하기'}
+                  {signingIn ? 'Google 로그인 창 여는 중...' : '교사 Google 로그인'}
                   <ArrowRight className="w-4 h-4" />
                 </button>
-                {isEmbeddedIframe ? (
+                <button
+                  type="button"
+                  onClick={onOpenStudentEntry}
+                  className="inline-flex items-center gap-2 px-5 py-3 text-sm font-semibold text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  <UserCheck className="w-4 h-4 text-emerald-700" />
+                  학생 설문 입장 (코드 입력)
+                </button>
+              </div>
+
+              {isEmbeddedIframe && (
+                <div>
                   <a
                     href={typeof window !== 'undefined' ? window.location.href : '#'}
                     target="_blank"
@@ -209,14 +222,10 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                     className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 underline underline-offset-2 whitespace-nowrap"
                   >
                     <ExternalLink className="w-3.5 h-3.5" />
-                    팝업이 안 뜨면 새 탭에서 열기
+                    교사 로그인 팝업이 안 뜨면 새 탭에서 열기
                   </a>
-                ) : (
-                  <span className="text-xs text-slate-500">
-                    교사 대시보드 · 학생 코드 설문 모두 지원
-                  </span>
-                )}
-              </div>
+                </div>
+              )}
             </div>
 
             {/* Interactive Sociogram Preview Panel */}

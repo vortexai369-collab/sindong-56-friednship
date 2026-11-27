@@ -1,19 +1,31 @@
-import React, { useMemo, useState } from 'react';
-import { ArrowUpDown, Download, MessageSquare } from 'lucide-react';
-import { SociometricType, Student, Survey, SurveyResponse } from '../types';
+import React, { useEffect, useMemo, useState } from 'react';
+import { ArrowUpDown, Download, MessageSquare, Save, Scale, UserSearch } from 'lucide-react';
+import {
+  ClosenessScore,
+  PeerRating,
+  SociometricType,
+  Student,
+  Survey,
+  SurveyResponse,
+} from '../types';
 import {
   computeClassAnalytics,
   exportAnalyticsToCsv,
+  formatScoreLabel,
   triggerCsvDownload,
 } from '../utils/sociometry';
+import { ClosenessAnalysisPanel } from './ClosenessAnalysisPanel';
 
 interface AnalyticsViewProps {
   survey: Survey;
   students: Student[];
   responses: SurveyResponse[];
+  initialSelectedStudentId?: string | null;
+  onSaveMemo: (studentId: string, memo: string) => Promise<void>;
 }
 
-type SortKey = 'number' | 'positiveIn' | 'positiveOut' | 'mutual' | 'negativeIn';
+type SortKey = 'number' | 'avgCloseness' | 'positiveIn' | 'mutual' | 'negativeIn';
+type AnalyticsSubTab = 'closeness' | 'responses' | 'asymmetric' | 'metrics' | 'matrix' | 'notes';
 
 const TYPE_TEXT_COLOR: Record<SociometricType, string> = {
   인기형: 'text-emerald-700',
@@ -24,20 +36,123 @@ const TYPE_TEXT_COLOR: Record<SociometricType, string> = {
   미분류: 'text-slate-500',
 };
 
+function scoreColorClass(score: ClosenessScore | undefined | null): string {
+  if (score === 2) return 'text-emerald-700 font-semibold';
+  if (score === 1) return 'text-blue-700 font-semibold';
+  if (score === 0) return 'text-slate-500';
+  if (score === -1) return 'text-amber-700 font-semibold';
+  if (score === -2) return 'text-red-700 font-semibold';
+  return 'text-slate-400';
+}
+
 export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
   survey,
   students,
   responses,
+  initialSelectedStudentId = null,
+  onSaveMemo,
 }) => {
-  const [subTab, setSubTab] = useState<'metrics' | 'matrix' | 'notes'>('metrics');
+  const [subTab, setSubTab] = useState<AnalyticsSubTab>(
+    initialSelectedStudentId ? 'responses' : 'closeness'
+  );
   const [sortKey, setSortKey] = useState<SortKey>('number');
   const [sortAsc, setSortAsc] = useState<boolean>(true);
   const [hoverCell, setHoverCell] = useState<{ r: number; c: number } | null>(null);
+
+  // Individual student response viewer state
+  const [selectedStudentId, setSelectedStudentId] = useState<string | null>(
+    initialSelectedStudentId
+  );
+  const [scoreFilter, setScoreFilter] = useState<'all' | 'positive' | 'negative' | 'neutral'>('all');
+  const [memoDraft, setMemoDraft] = useState('');
+  const [savingMemo, setSavingMemo] = useState(false);
+  const [memoSaved, setMemoSaved] = useState(false);
 
   const analytics = useMemo(
     () => computeClassAnalytics(students, responses, 'all'),
     [students, responses]
   );
+
+  const orderedStudents = useMemo(
+    () => [...students].sort((a, b) => a.number - b.number),
+    [students]
+  );
+
+  const responseByStudentId = useMemo(() => {
+    const map: Record<string, SurveyResponse> = {};
+    responses.forEach((r) => {
+      map[r.studentDocId] = r;
+    });
+    return map;
+  }, [responses]);
+
+  // Sync external navigation to a specific student's response
+  useEffect(() => {
+    if (initialSelectedStudentId) {
+      setSelectedStudentId(initialSelectedStudentId);
+      setSubTab('responses');
+    }
+  }, [initialSelectedStudentId]);
+
+  // Default select first responded student
+  useEffect(() => {
+    if (!selectedStudentId && orderedStudents.length > 0) {
+      const firstResponded = orderedStudents.find((s) => responseByStudentId[s.id]);
+      setSelectedStudentId(firstResponded?.id || orderedStudents[0].id);
+    }
+  }, [selectedStudentId, orderedStudents, responseByStudentId]);
+
+  const selectedStudent = orderedStudents.find((s) => s.id === selectedStudentId) || null;
+  const selectedResponse = selectedStudent ? responseByStudentId[selectedStudent.id] : null;
+  const selectedMetric = selectedStudent ? analytics.metricsById[selectedStudent.id] : null;
+
+  useEffect(() => {
+    if (selectedStudent) {
+      setMemoDraft(selectedStudent.memo || '');
+      setMemoSaved(false);
+    }
+  }, [selectedStudent?.id, selectedStudent?.memo]);
+
+  // Helper to look up pairwise rating from A -> B
+  const getRatingBetween = (fromId: string, toId: string): PeerRating | null => {
+    const resp = responseByStudentId[fromId];
+    if (!resp?.peerRatings?.length) return null;
+    return resp.peerRatings.find((r) => r.targetId === toId) || null;
+  };
+
+  // Build rows for selected student's 1:1 responses
+  const selectedStudentRatingRows = useMemo(() => {
+    if (!selectedStudent || !selectedResponse) return [];
+    const peerRatings = selectedResponse.peerRatings || [];
+
+    // If new peerRatings exist, show all rated classmates with reciprocal score
+    if (peerRatings.length > 0) {
+      const ratingByTarget: Record<string, PeerRating> = {};
+      peerRatings.forEach((r) => {
+        ratingByTarget[r.targetId] = r;
+      });
+
+      return orderedStudents
+        .filter((m) => m.id !== selectedStudent.id)
+        .map((target) => {
+          const given = ratingByTarget[target.id] || null;
+          const reverse = getRatingBetween(target.id, selectedStudent.id);
+          const gap =
+            given && reverse ? Math.abs(given.score - reverse.score) : null;
+          return { target, given, reverse, gap };
+        })
+        .filter((row) => {
+          const sc = row.given?.score ?? 0;
+          if (scoreFilter === 'positive') return sc >= 1;
+          if (scoreFilter === 'negative') return sc <= -1;
+          if (scoreFilter === 'neutral') return sc === 0;
+          return true;
+        })
+        .sort((a, b) => (b.given?.score ?? -99) - (a.given?.score ?? -99) || a.target.number - b.target.number);
+    }
+
+    return [];
+  }, [selectedStudent, selectedResponse, orderedStudents, scoreFilter, responseByStudentId]);
 
   const sortedMetrics = useMemo(() => {
     const arr = [...analytics.metricsList];
@@ -47,11 +162,11 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
         case 'number':
           diff = a.student.number - b.student.number;
           break;
+        case 'avgCloseness':
+          diff = (a.avgClosenessReceived ?? -9) - (b.avgClosenessReceived ?? -9);
+          break;
         case 'positiveIn':
           diff = a.positiveIn - b.positiveIn;
-          break;
-        case 'positiveOut':
-          diff = a.positiveOut - b.positiveOut;
           break;
         case 'mutual':
           diff = a.mutualIds.length - b.mutualIds.length;
@@ -65,18 +180,48 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
     return arr;
   }, [analytics.metricsList, sortKey, sortAsc]);
 
-  const orderedStudents = useMemo(
-    () => [...students].sort((a, b) => a.number - b.number),
-    [students]
-  );
+  // Combine general teacherNote AND per-friend private notes
+  const allPrivateNotes = useMemo(() => {
+    const list: Array<{
+      id: string;
+      student: Student;
+      sociometricType: SociometricType;
+      targetName?: string;
+      score?: ClosenessScore;
+      text: string;
+    }> = [];
 
-  const notesList = useMemo(
-    () =>
-      analytics.metricsList
-        .filter((m) => m.teacherNote.trim().length > 0)
-        .sort((a, b) => a.student.number - b.student.number),
-    [analytics.metricsList]
-  );
+    orderedStudents.forEach((stu) => {
+      const resp = responseByStudentId[stu.id];
+      const metric = analytics.metricsById[stu.id];
+      if (!resp || !metric) return;
+
+      if (resp.teacherNote?.trim()) {
+        list.push({
+          id: `${stu.id}_general`,
+          student: stu,
+          sociometricType: metric.sociometricType,
+          text: resp.teacherNote.trim(),
+        });
+      }
+
+      (resp.peerRatings || []).forEach((pr) => {
+        if (pr.note?.trim()) {
+          const target = analytics.metricsById[pr.targetId]?.student;
+          list.push({
+            id: `${stu.id}_${pr.targetId}`,
+            student: stu,
+            sociometricType: metric.sociometricType,
+            targetName: target ? `${target.number}번 ${target.name}` : pr.targetId,
+            score: pr.score,
+            text: pr.note.trim(),
+          });
+        }
+      });
+    });
+
+    return list;
+  }, [orderedStudents, responseByStudentId, analytics.metricsById]);
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -92,12 +237,29 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
     triggerCsvDownload(csv, `${survey.className}_교우관계분석.csv`);
   };
 
+  const handleSaveMemoClick = async () => {
+    if (!selectedStudent) return;
+    setSavingMemo(true);
+    try {
+      await onSaveMemo(selectedStudent.id, memoDraft);
+      setMemoSaved(true);
+    } finally {
+      setSavingMemo(false);
+    }
+  };
+
+  const nameOf = (id: string) => {
+    const m = analytics.metricsById[id];
+    return m ? `${m.student.number}번 ${m.student.name}` : id;
+  };
+
   if (students.length === 0) {
     return (
       <div className="bg-white border border-slate-200 rounded-xl p-12 text-center space-y-2">
         <p className="text-base font-semibold text-slate-900">분석할 학생 데이터가 없습니다</p>
         <p className="text-sm text-slate-500">
-          학생 명단을 등록하고 설문 응답이 수집되면 소시오메트리 분석 결과가 자동으로 계산됩니다.
+          학생 명단을 등록하고 설문 응답이 수집되면 교사 전용 개별 응답표와 관계 분석이 자동으로
+          생성됩니다.
         </p>
       </div>
     );
@@ -118,21 +280,32 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
-          <p className="text-xs font-medium text-slate-500">상호 선택률 (학급 응집도)</p>
-          <p className="text-2xl font-bold text-emerald-700 tabular-nums">
-            {analytics.reciprocityRate}%
+          <p className="text-xs font-medium text-slate-500">학급 평균 친밀도</p>
+          <p
+            className={`text-2xl font-bold tabular-nums ${
+              (analytics.closenessSummary.classAvgCloseness ?? 0) >= 0.2
+                ? 'text-emerald-700'
+                : (analytics.closenessSummary.classAvgCloseness ?? 0) < 0
+                ? 'text-red-600'
+                : 'text-slate-900'
+            }`}
+          >
+            {analytics.closenessSummary.classAvgCloseness !== null
+              ? `${analytics.closenessSummary.classAvgCloseness > 0 ? '+' : ''}${analytics.closenessSummary.classAvgCloseness.toFixed(2)}`
+              : '—'}
           </p>
           <p className="text-xs text-slate-500 tabular-nums">
-            쌍방 친구 연결 {analytics.mutualPairCount}쌍
+            핵심 단짝(+2↔+2) {analytics.closenessSummary.bestMutualPairs.length}쌍 · 응집도{' '}
+            {analytics.reciprocityRate}%
           </p>
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
-          <p className="text-xs font-medium text-slate-500">학생당 평균 긍정 지명</p>
-          <p className="text-2xl font-bold text-slate-900 tabular-nums">
-            {analytics.avgPositiveIn}명
+          <p className="text-xs font-medium text-slate-500">관계 온도차 감지</p>
+          <p className="text-2xl font-bold text-blue-700 tabular-nums">
+            {analytics.asymmetricPairs.length}쌍
           </p>
-          <p className="text-xs text-slate-500">고유 친구 기준 평균 선택받음</p>
+          <p className="text-xs text-slate-500">친밀도 인식 차이 2단계 이상</p>
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
@@ -149,40 +322,30 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
 
       {/* Sub-navigation + Export */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-1 p-1 bg-slate-200/70 rounded-lg">
-          <button
-            type="button"
-            onClick={() => setSubTab('metrics')}
-            className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
-              subTab === 'metrics'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            학생별 지표표
-          </button>
-          <button
-            type="button"
-            onClick={() => setSubTab('matrix')}
-            className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
-              subTab === 'matrix'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            교우관계 행렬표 (Matrix)
-          </button>
-          <button
-            type="button"
-            onClick={() => setSubTab('notes')}
-            className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
-              subTab === 'notes'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            선생님께 남긴 말 ({notesList.length})
-          </button>
+        <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-200/70 rounded-lg">
+          {(
+            [
+              { id: 'closeness', label: '친밀도 분석' },
+              { id: 'responses', label: `학생별 응답 보기 (${responses.length})` },
+              { id: 'asymmetric', label: `관계 온도차 (${analytics.asymmetricPairs.length})` },
+              { id: 'metrics', label: '학생별 지표표' },
+              { id: 'matrix', label: '친밀도 행렬표' },
+              { id: 'notes', label: `비공개 메모 (${allPrivateNotes.length})` },
+            ] as const
+          ).map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setSubTab(tab.id)}
+              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
+                subTab === tab.id
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
 
         <button
@@ -195,7 +358,397 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
         </button>
       </div>
 
-      {/* SubTab 1: Metrics Table */}
+      {/* SubTab 0: Comprehensive 5-Level Closeness Analytics */}
+      {subTab === 'closeness' && (
+        <ClosenessAnalysisPanel
+          analytics={analytics}
+          onInspectStudent={(studentId) => {
+            setSelectedStudentId(studentId);
+            setSubTab('responses');
+          }}
+        />
+      )}
+
+      {/* SubTab 1: Teacher Individual Student Response Viewer */}
+      {subTab === 'responses' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+          {/* Left Student Picker */}
+          <div className="lg:col-span-3 bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center gap-2 text-xs font-semibold text-slate-700">
+              <UserSearch className="w-3.5 h-3.5 text-slate-500" />
+              학생 선택 (교사 전용 열람)
+            </div>
+            <div className="divide-y divide-slate-100 max-h-[600px] overflow-y-auto">
+              {orderedStudents.map((stu) => {
+                const hasResp = Boolean(responseByStudentId[stu.id]);
+                const isSelected = stu.id === selectedStudentId;
+                return (
+                  <button
+                    key={stu.id}
+                    type="button"
+                    onClick={() => setSelectedStudentId(stu.id)}
+                    className={`w-full px-4 py-2.5 flex items-center justify-between gap-2 text-left transition-colors cursor-pointer ${
+                      isSelected
+                        ? 'bg-slate-900 text-white'
+                        : 'bg-white hover:bg-slate-50 text-slate-800'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span
+                        className={`font-mono text-xs w-5 tabular-nums ${
+                          isSelected ? 'text-slate-400' : 'text-slate-400'
+                        }`}
+                      >
+                        {stu.number}
+                      </span>
+                      <span className="text-sm font-medium truncate">{stu.name}</span>
+                    </div>
+                    <span
+                      className={`text-[11px] whitespace-nowrap ${
+                        isSelected
+                          ? hasResp
+                            ? 'text-emerald-300'
+                            : 'text-slate-400'
+                          : hasResp
+                          ? 'text-emerald-700 font-medium'
+                          : 'text-slate-400'
+                      }`}
+                    >
+                      {hasResp ? '응답완료' : '미응답'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Right Detailed Individual Response Sheet */}
+          <div className="lg:col-span-9 bg-white border border-slate-200 rounded-xl p-6 space-y-6">
+            {selectedStudent ? (
+              <>
+                <div className="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-slate-100">
+                  <div>
+                    <p className="text-xs text-slate-500 tabular-nums">
+                      {selectedStudent.studentCode} · {selectedStudent.number}번 ·{' '}
+                      {selectedStudent.gender} ·{' '}
+                      <span
+                        className={`font-semibold ${
+                          TYPE_TEXT_COLOR[selectedMetric?.sociometricType || '미분류']
+                        }`}
+                      >
+                        {selectedMetric?.sociometricType || '미분류'}
+                      </span>
+                    </p>
+                    <h2 className="text-xl font-bold text-slate-900 mt-0.5">
+                      {selectedStudent.name} 학생의 개별 설문 응답
+                    </h2>
+                  </div>
+
+                  {selectedMetric && (
+                    <div className="flex items-center gap-5 text-xs tabular-nums">
+                      <div>
+                        <span className="text-slate-500 block">받은 평균 친밀도</span>
+                        <span className="text-base font-bold text-slate-900">
+                          {selectedMetric.avgClosenessReceived !== null
+                            ? `${selectedMetric.avgClosenessReceived > 0 ? '+' : ''}${selectedMetric.avgClosenessReceived.toFixed(2)}`
+                            : '—'}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block">상호 친구</span>
+                        <span className="text-base font-bold text-emerald-700">
+                          {selectedMetric.mutualIds.length}명
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block">불편·어색 받음</span>
+                        <span className="text-base font-bold text-red-600">
+                          {selectedMetric.negativeIn}명
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {!selectedResponse ? (
+                  <div className="py-10 text-center text-sm text-slate-500">
+                    {selectedStudent.name} 학생은 아직 설문 응답을 제출하지 않았습니다.
+                  </div>
+                ) : selectedResponse.peerRatings && selectedResponse.peerRatings.length > 0 ? (
+                  <>
+                    {/* Filter by Score */}
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
+                        {(
+                          [
+                            { id: 'all', label: '전체 친구' },
+                            { id: 'positive', label: '친함 (+1/+2)' },
+                            { id: 'negative', label: '어색·불편 (-1/-2)' },
+                            { id: 'neutral', label: '보통 (0)' },
+                          ] as const
+                        ).map((f) => (
+                          <button
+                            key={f.id}
+                            type="button"
+                            onClick={() => setScoreFilter(f.id)}
+                            className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
+                              scoreFilter === f.id
+                                ? 'bg-white text-slate-900 shadow-xs'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            {f.label}
+                          </button>
+                        ))}
+                      </div>
+                      <span className="text-xs text-slate-500 tabular-nums">
+                        표시 {selectedStudentRatingRows.length}명
+                      </span>
+                    </div>
+
+                    {/* 1:1 Peer Ratings Table */}
+                    <div className="overflow-x-auto border border-slate-200 rounded-lg">
+                      <table className="w-full text-sm border-collapse">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-left text-xs font-semibold text-slate-600">
+                            <th className="py-2.5 px-3 whitespace-nowrap">대상 친구</th>
+                            <th className="py-2.5 px-3 whitespace-nowrap">
+                              {selectedStudent.name}의 평가
+                            </th>
+                            <th className="py-2.5 px-3 whitespace-nowrap">상대방의 맞평가</th>
+                            <th className="py-2.5 px-3 whitespace-nowrap">관계 태그</th>
+                            <th className="py-2.5 px-3 whitespace-nowrap">개별 메모</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {selectedStudentRatingRows.length === 0 ? (
+                            <tr>
+                              <td
+                                colSpan={5}
+                                className="py-8 text-center text-xs text-slate-500"
+                              >
+                                선택한 필터에 해당하는 친구가 없습니다.
+                              </td>
+                            </tr>
+                          ) : (
+                            selectedStudentRatingRows.map(({ target, given, reverse, gap }) => (
+                              <tr key={target.id} className="hover:bg-slate-50/70">
+                                <td className="py-2.5 px-3 whitespace-nowrap">
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedStudentId(target.id)}
+                                    className="text-left hover:text-blue-700 cursor-pointer"
+                                  >
+                                    <span className="font-mono text-xs text-slate-400 mr-1.5 tabular-nums">
+                                      {target.number}
+                                    </span>
+                                    <span className="font-medium text-slate-900">
+                                      {target.name}
+                                    </span>
+                                  </button>
+                                </td>
+                                <td
+                                  className={`py-2.5 px-3 text-xs whitespace-nowrap tabular-nums ${scoreColorClass(
+                                    given?.score
+                                  )}`}
+                                >
+                                  {formatScoreLabel(given?.score)}
+                                </td>
+                                <td className="py-2.5 px-3 text-xs whitespace-nowrap tabular-nums">
+                                  <span className={scoreColorClass(reverse?.score)}>
+                                    {reverse ? formatScoreLabel(reverse.score) : '미응답'}
+                                  </span>
+                                  {gap !== null && gap >= 2 && (
+                                    <span className="ml-2 text-amber-700 font-semibold">
+                                      · 온도차 {gap}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-2.5 px-3 text-xs text-slate-700">
+                                  {given?.tags?.length
+                                    ? given.tags.map((t) => `#${t}`).join('  ')
+                                    : '—'}
+                                </td>
+                                <td className="py-2.5 px-3 text-xs text-slate-600 max-w-[220px]">
+                                  {given?.note ? given.note : '—'}
+                                </td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                ) : (
+                  /* Fallback display for legacy nomination-only responses */
+                  <div className="space-y-3 border border-slate-200 rounded-lg p-4">
+                    <p className="text-xs font-semibold text-slate-600">문항별 지명 응답</p>
+                    {selectedResponse.answers.map((ans) => {
+                      const qObj = survey.questions.find((q) => q.id === ans.questionId);
+                      return (
+                        <div key={ans.questionId} className="text-sm space-y-0.5">
+                          <p className="text-xs text-slate-500">{qObj?.text || ans.questionId}</p>
+                          <p className="font-medium text-slate-900">
+                            {ans.selectedIds.length > 0
+                              ? ans.selectedIds.map(nameOf).join(', ')
+                              : '선택 없음'}
+                          </p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Student General Note + Teacher Counseling Memo */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-slate-100">
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-semibold text-blue-700">
+                      {selectedStudent.name} 학생이 선생님께 남긴 말
+                    </p>
+                    <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200/70 text-sm text-slate-700 min-h-[88px] whitespace-pre-wrap">
+                      {selectedResponse?.teacherNote?.trim()
+                        ? selectedResponse.teacherNote
+                        : '작성된 메시지가 없습니다.'}
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label
+                        htmlFor="analytics-memo-input"
+                        className="text-xs font-semibold text-slate-700"
+                      >
+                        교사 비공개 상담 메모
+                      </label>
+                      {memoSaved && (
+                        <span className="text-xs font-medium text-emerald-700">저장됨</span>
+                      )}
+                    </div>
+                    <textarea
+                      id="analytics-memo-input"
+                      rows={3}
+                      maxLength={500}
+                      value={memoDraft}
+                      onChange={(e) => {
+                        setMemoDraft(e.target.value);
+                        setMemoSaved(false);
+                      }}
+                      placeholder="이 학생의 교우관계 관찰 내용이나 상담 기록을 남겨두세요..."
+                      className="w-full p-2.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-600 resize-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleSaveMemoClick}
+                      disabled={savingMemo}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-50 cursor-pointer"
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                      {savingMemo ? '저장 중...' : '메모 저장'}
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : null}
+          </div>
+        </div>
+      )}
+
+      {/* SubTab 2: Asymmetric Temperature-Gap Analysis */}
+      {subTab === 'asymmetric' && (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+          <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Scale className="w-4 h-4 text-blue-700" />
+              <div>
+                <h3 className="text-sm font-semibold text-slate-900">
+                  관계 온도차 (인식 비대칭 쌍) 자동 분석
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  서로 응답한 두 학생 사이에서 친밀도 평가가 2단계 이상 차이나는 쌍을 자동으로
+                  추출합니다.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {analytics.asymmetricPairs.length === 0 ? (
+            <div className="p-10 text-center text-sm text-slate-500">
+              친밀도 평가가 2단계 이상 차이나는 비대칭 관계 쌍이 아직 발견되지 않았습니다.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm border-collapse">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200 text-left text-xs font-semibold text-slate-600">
+                    <th className="py-2.5 px-4 whitespace-nowrap">학생 A → 학생 B</th>
+                    <th className="py-2.5 px-4 whitespace-nowrap">A의 평가</th>
+                    <th className="py-2.5 px-4 whitespace-nowrap">B의 맞평가</th>
+                    <th className="py-2.5 px-4 text-right whitespace-nowrap">온도차</th>
+                    <th className="py-2.5 px-4 whitespace-nowrap">선택 태그 비교</th>
+                    <th className="py-2.5 px-4 text-right whitespace-nowrap">상세</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {analytics.asymmetricPairs.map((pair) => (
+                    <tr
+                      key={`${pair.fromId}_${pair.toId}`}
+                      className="hover:bg-slate-50/70 h-12"
+                    >
+                      <td className="py-2.5 px-4 font-medium text-slate-900 whitespace-nowrap">
+                        {nameOf(pair.fromId)} <span className="text-slate-400 mx-1">↔</span>{' '}
+                        {nameOf(pair.toId)}
+                      </td>
+                      <td
+                        className={`py-2.5 px-4 text-xs whitespace-nowrap tabular-nums ${scoreColorClass(
+                          pair.scoreFromTo
+                        )}`}
+                      >
+                        {formatScoreLabel(pair.scoreFromTo)}
+                      </td>
+                      <td
+                        className={`py-2.5 px-4 text-xs whitespace-nowrap tabular-nums ${scoreColorClass(
+                          pair.scoreToFrom
+                        )}`}
+                      >
+                        {formatScoreLabel(pair.scoreToFrom)}
+                      </td>
+                      <td className="py-2.5 px-4 text-right font-mono text-xs font-bold text-amber-700 tabular-nums">
+                        {pair.gap}단계
+                      </td>
+                      <td className="py-2.5 px-4 text-xs text-slate-600">
+                        {pair.tagsFromTo.length > 0 && (
+                          <span>A: {pair.tagsFromTo.map((t) => `#${t}`).join(' ')}</span>
+                        )}
+                        {pair.tagsFromTo.length > 0 && pair.tagsToFrom.length > 0 && (
+                          <span className="mx-1.5 text-slate-300">/</span>
+                        )}
+                        {pair.tagsToFrom.length > 0 && (
+                          <span>B: {pair.tagsToFrom.map((t) => `#${t}`).join(' ')}</span>
+                        )}
+                        {pair.tagsFromTo.length === 0 && pair.tagsToFrom.length === 0 && '—'}
+                      </td>
+                      <td className="py-2.5 px-4 text-right whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedStudentId(pair.fromId);
+                            setSubTab('responses');
+                          }}
+                          className="text-xs font-medium text-blue-700 hover:text-blue-900 cursor-pointer"
+                        >
+                          응답 보기
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* SubTab 3: Metrics Table */}
       {subTab === 'metrics' && (
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
           <div className="overflow-x-auto">
@@ -213,24 +766,23 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                     </button>
                   </th>
                   <th className="py-2.5 px-3 text-left whitespace-nowrap">성별</th>
-                  <th className="py-2.5 px-3 text-left whitespace-nowrap">응답</th>
                   <th className="py-2.5 px-3 text-right whitespace-nowrap">
                     <button
                       type="button"
-                      onClick={() => handleSort('positiveIn')}
+                      onClick={() => handleSort('avgCloseness')}
                       className="inline-flex items-center gap-1 hover:text-slate-900 cursor-pointer"
                     >
-                      긍정 선택받음
+                      평균 친밀도
                       <ArrowUpDown className="w-3 h-3" />
                     </button>
                   </th>
                   <th className="py-2.5 px-3 text-right whitespace-nowrap">
                     <button
                       type="button"
-                      onClick={() => handleSort('positiveOut')}
+                      onClick={() => handleSort('positiveIn')}
                       className="inline-flex items-center gap-1 hover:text-slate-900 cursor-pointer"
                     >
-                      긍정 선택함
+                      긍정 받음 (+2)
                       <ArrowUpDown className="w-3 h-3" />
                     </button>
                   </th>
@@ -250,12 +802,13 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                       onClick={() => handleSort('negativeIn')}
                       className="inline-flex items-center gap-1 hover:text-slate-900 cursor-pointer"
                     >
-                      갈등 지명받음
+                      불편·어색 받음
                       <ArrowUpDown className="w-3 h-3" />
                     </button>
                   </th>
                   <th className="py-2.5 px-4 text-left whitespace-nowrap">관계 유형</th>
-                  <th className="py-2.5 px-4 text-left whitespace-nowrap">교사 메모</th>
+                  <th className="py-2.5 px-4 text-left whitespace-nowrap">주요 받은 태그</th>
+                  <th className="py-2.5 px-4 text-right whitespace-nowrap">개별 응답</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -268,18 +821,27 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                       <span className="font-medium text-slate-900">{m.student.name}</span>
                     </td>
                     <td className="py-2 px-3 text-xs text-slate-600">{m.student.gender}</td>
-                    <td className="py-2 px-3 text-xs">
-                      {m.responded ? (
-                        <span className="text-emerald-700 font-medium">완료</span>
+                    <td className="py-2 px-3 text-right font-mono text-xs font-semibold tabular-nums">
+                      {m.avgClosenessReceived !== null ? (
+                        <span
+                          className={
+                            m.avgClosenessReceived >= 0.4
+                              ? 'text-emerald-700'
+                              : m.avgClosenessReceived < 0
+                              ? 'text-red-600'
+                              : 'text-slate-700'
+                          }
+                        >
+                          {m.avgClosenessReceived > 0 ? '+' : ''}
+                          {m.avgClosenessReceived.toFixed(2)}
+                        </span>
                       ) : (
-                        <span className="text-slate-400">미응답</span>
+                        <span className="text-slate-400">—</span>
                       )}
                     </td>
-                    <td className="py-2 px-3 text-right font-mono text-sm font-semibold text-slate-900 tabular-nums">
-                      {m.positiveIn}
-                    </td>
-                    <td className="py-2 px-3 text-right font-mono text-sm text-slate-600 tabular-nums">
-                      {m.positiveOut}
+                    <td className="py-2 px-3 text-right font-mono text-xs text-slate-900 tabular-nums">
+                      <strong>{m.positiveIn}</strong>
+                      <span className="text-slate-400 ml-1">({m.veryCloseIn})</span>
                     </td>
                     <td className="py-2 px-3 text-right font-mono text-sm font-semibold text-emerald-700 tabular-nums">
                       {m.mutualIds.length}
@@ -295,32 +857,50 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                     >
                       {m.negativeIn}
                     </td>
-                    <td className={`py-2 px-4 text-xs font-semibold whitespace-nowrap ${TYPE_TEXT_COLOR[m.sociometricType]}`}>
+                    <td
+                      className={`py-2 px-4 text-xs font-semibold whitespace-nowrap ${
+                        TYPE_TEXT_COLOR[m.sociometricType]
+                      }`}
+                    >
                       {m.sociometricType}
                     </td>
-                    <td className="py-2 px-4 text-xs text-slate-600 max-w-[240px] truncate">
-                      {m.student.memo || '—'}
+                    <td className="py-2 px-4 text-xs text-slate-600 max-w-[200px] truncate">
+                      {m.topPositiveTags.length > 0
+                        ? m.topPositiveTags.slice(0, 2).map((t) => `#${t.tag}`).join(' ')
+                        : m.topNegativeTags.length > 0
+                        ? m.topNegativeTags.slice(0, 2).map((t) => `#${t.tag}`).join(' ')
+                        : '—'}
+                    </td>
+                    <td className="py-2 px-4 text-right whitespace-nowrap">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedStudentId(m.student.id);
+                          setSubTab('responses');
+                        }}
+                        className="text-xs font-medium text-blue-700 hover:text-blue-900 cursor-pointer"
+                      >
+                        {m.responded ? '응답 보기' : '미응답'}
+                      </button>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          <div className="px-4 py-2.5 border-t border-slate-100 bg-slate-50/40 text-xs text-slate-500">
-            유형 분류는 학급 내 표준점수(사회적 선호도·영향력)를 기반으로 3명 이상 응답 시 자동 산출됩니다.
-          </div>
         </div>
       )}
 
-      {/* SubTab 2: Adjacency Matrix */}
+      {/* SubTab 4: Closeness Adjacency Matrix */}
       {subTab === 'matrix' && (
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
           <div className="px-4 py-3 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
-            <span>가로행(선택한 학생) → 세로열(선택받은 학생)</span>
-            <div className="flex items-center gap-4">
-              <span className="text-emerald-700 font-semibold">★ 상호 선택</span>
-              <span className="text-blue-700 font-semibold">● 일방 긍정</span>
-              <span className="text-red-600 font-semibold">× 갈등 지명</span>
+            <span>가로행(응답 학생) → 세로열(대상 친구)</span>
+            <div className="flex items-center gap-4 font-mono">
+              <span className="text-emerald-700 font-bold">+2 매우친함</span>
+              <span className="text-blue-700 font-semibold">+1 친한편</span>
+              <span className="text-amber-700 font-semibold">-1 어색</span>
+              <span className="text-red-700 font-bold">-2 불편</span>
             </div>
           </div>
           <div className="overflow-x-auto">
@@ -328,7 +908,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-200">
                   <th className="sticky left-0 z-10 bg-slate-50 py-2 px-3 text-left font-semibold text-slate-600 border-r border-slate-200 whitespace-nowrap">
-                    선택자 \ 대상
+                    응답자 \ 대상
                   </th>
                   {orderedStudents.map((col, cIdx) => (
                     <th
@@ -363,9 +943,9 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                       </td>
                       {orderedStudents.map((col, cIdx) => {
                         const isSelf = row.id === col.id;
-                        const isMutual = rowMetric?.mutualIds.includes(col.id);
-                        const isPos = rowMetric?.chosePositive.includes(col.id);
-                        const isNeg = rowMetric?.choseNegative.includes(col.id);
+                        const pr = getRatingBetween(row.id, col.id);
+                        const isPosLegacy = !pr && rowMetric?.chosePositive.includes(col.id);
+                        const isNegLegacy = !pr && rowMetric?.choseNegative.includes(col.id);
                         const isCrosshair = hoverCell?.r === rIdx || hoverCell?.c === cIdx;
 
                         return (
@@ -373,7 +953,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                             key={col.id}
                             onMouseEnter={() => setHoverCell({ r: rIdx, c: cIdx })}
                             onMouseLeave={() => setHoverCell(null)}
-                            className={`py-1.5 px-1 text-center border-r border-slate-50 ${
+                            className={`py-1.5 px-1 text-center font-mono tabular-nums border-r border-slate-50 ${
                               isSelf
                                 ? 'bg-slate-100'
                                 : isCrosshair
@@ -383,18 +963,28 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                           >
                             {isSelf ? (
                               <span className="text-slate-300">·</span>
-                            ) : isMutual ? (
-                              <span className="text-emerald-600 font-bold" title={`${row.name} ↔ ${col.name} 상호 친구`}>
-                                ★
-                              </span>
-                            ) : isPos ? (
-                              <span className="text-blue-600" title={`${row.name} → ${col.name} 긍정 선택`}>
-                                ●
-                              </span>
-                            ) : isNeg ? (
-                              <span className="text-red-600 font-bold" title={`${row.name} → ${col.name} 갈등 지명`}>
-                                ×
-                              </span>
+                            ) : pr ? (
+                              pr.score === 2 ? (
+                                <span className="text-emerald-700 font-bold" title={`${row.name} → ${col.name}: 매우 친함 (+2)`}>
+                                  +2
+                                </span>
+                              ) : pr.score === 1 ? (
+                                <span className="text-blue-700 font-semibold" title={`${row.name} → ${col.name}: 친한 편 (+1)`}>
+                                  +1
+                                </span>
+                              ) : pr.score === -1 ? (
+                                <span className="text-amber-700 font-semibold" title={`${row.name} → ${col.name}: 어색함 (-1)`}>
+                                  -1
+                                </span>
+                              ) : pr.score === -2 ? (
+                                <span className="text-red-700 font-bold" title={`${row.name} → ${col.name}: 불편함 (-2)`}>
+                                  -2
+                                </span>
+                              ) : null
+                            ) : isPosLegacy ? (
+                              <span className="text-blue-600">●</span>
+                            ) : isNegLegacy ? (
+                              <span className="text-red-600 font-bold">×</span>
                             ) : null}
                           </td>
                         );
@@ -408,31 +998,37 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
         </div>
       )}
 
-      {/* SubTab 3: Student Private Notes to Teacher */}
+      {/* SubTab 5: All Private Messages & Per-Friend Notes */}
       {subTab === 'notes' && (
         <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100">
-          {notesList.length === 0 ? (
+          {allPrivateNotes.length === 0 ? (
             <div className="p-10 text-center text-sm text-slate-500">
-              학생들이 선생님께 남긴 비공개 메시지가 아직 없습니다.
+              학생들이 선생님께 남긴 비공개 메시지나 친구별 메모가 아직 없습니다.
             </div>
           ) : (
-            notesList.map((m) => (
-              <div key={m.student.id} className="p-5 flex items-start gap-4">
+            allPrivateNotes.map((item) => (
+              <div key={item.id} className="p-5 flex items-start gap-4">
                 <MessageSquare className="w-4 h-4 text-slate-400 mt-1 shrink-0" />
                 <div className="space-y-1 flex-1">
-                  <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
                     <span className="font-semibold text-slate-900 text-sm">
-                      {m.student.number}번 {m.student.name}
+                      {item.student.number}번 {item.student.name}
                     </span>
                     <span aria-hidden="true">·</span>
-                    <span>{m.student.gender}</span>
-                    <span aria-hidden="true">·</span>
-                    <span className={`font-medium ${TYPE_TEXT_COLOR[m.sociometricType]}`}>
-                      {m.sociometricType}
+                    <span className={`font-medium ${TYPE_TEXT_COLOR[item.sociometricType]}`}>
+                      {item.sociometricType}
                     </span>
+                    {item.targetName && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="text-slate-700 font-medium">
+                          대상: {item.targetName} ({formatScoreLabel(item.score)})
+                        </span>
+                      </>
+                    )}
                   </div>
                   <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">
-                    {m.teacherNote}
+                    {item.text}
                   </p>
                 </div>
               </div>

@@ -15,6 +15,8 @@ import {
 } from 'lucide-react';
 import {
   ClassAnalytics,
+  NEGATIVE_RELATION_TAGS,
+  POSITIVE_RELATION_TAGS,
   SociogramEdge,
   SociometricType,
   Student,
@@ -28,10 +30,11 @@ interface SociogramCanvasProps {
   students: Student[];
   responses: SurveyResponse[];
   onSaveMemo: (studentId: string, memo: string) => Promise<void>;
+  onViewStudentResponse?: (studentId: string) => void;
 }
 
 type LayoutMode = 'force' | 'target' | 'circle';
-type ColorMode = 'gender' | 'type' | 'cluster';
+type ColorMode = 'gender' | 'closeness' | 'type' | 'cluster';
 type EgoDirectionFilter = 'both' | 'incoming' | 'outgoing';
 
 interface SimNode extends d3.SimulationNodeDatum {
@@ -43,6 +46,8 @@ interface SimNode extends d3.SimulationNodeDatum {
   positiveOut: number;
   negativeIn: number;
   mutualCount: number;
+  avgClosenessReceived: number | null;
+  avgClosenessGiven: number | null;
   sociometricType: SociometricType;
   responded: boolean;
   clusterColor: string;
@@ -54,6 +59,8 @@ interface SimLink extends d3.SimulationLinkDatum<SimNode> {
   target: string | SimNode;
   type: SociogramEdge['type'];
   weight: number;
+  maxScore: number;
+  minScore: number;
   questionIds: string[];
 }
 
@@ -74,11 +81,21 @@ const TYPE_COLOR: Record<SociometricType, string> = {
   미분류: '#64748B',
 };
 
+function getClosenessNodeColor(avg: number | null): string {
+  if (avg === null) return '#94A3B8';
+  if (avg >= 0.45) return '#059669';
+  if (avg >= 0.1) return '#2563EB';
+  if (avg > -0.15) return '#64748B';
+  if (avg > -0.45) return '#D97706';
+  return '#DC2626';
+}
+
 export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
   survey,
   students,
   responses,
   onSaveMemo,
+  onViewStudentResponse,
 }) => {
   const [questionFilter, setQuestionFilter] = useState<string>('all');
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('force');
@@ -185,33 +202,27 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
 
     const defs = svg.append('defs');
 
-    // Arrowhead for positive unidirectional selection
-    defs
-      .append('marker')
-      .attr('id', 'socio-arrow-pos')
-      .attr('viewBox', '0 -5 10 10')
-      .attr('refX', 10)
-      .attr('refY', 0)
-      .attr('markerWidth', 6)
-      .attr('markerHeight', 6)
-      .attr('orient', 'auto')
-      .append('path')
-      .attr('d', 'M0,-4L9,0L0,4Z')
-      .attr('fill', '#64748B');
-
-    // Arrowhead for conflict/negative nomination
-    defs
-      .append('marker')
-      .attr('id', 'socio-arrow-neg')
-      .attr('viewBox', '0 -5 10 10')
-      .attr('refX', 10)
-      .attr('refY', 0)
-      .attr('markerWidth', 6)
-      .attr('markerHeight', 6)
-      .attr('orient', 'auto')
-      .append('path')
-      .attr('d', 'M0,-4L9,0L0,4Z')
-      .attr('fill', '#DC2626');
+    // Arrowheads by closeness level
+    const markerSpecs = [
+      { id: 'socio-arrow-pos2', fill: '#2563EB' },
+      { id: 'socio-arrow-pos', fill: '#94A3B8' },
+      { id: 'socio-arrow-neg1', fill: '#D97706' },
+      { id: 'socio-arrow-neg', fill: '#DC2626' },
+    ];
+    markerSpecs.forEach((m) => {
+      defs
+        .append('marker')
+        .attr('id', m.id)
+        .attr('viewBox', '0 -5 10 10')
+        .attr('refX', 10)
+        .attr('refY', 0)
+        .attr('markerWidth', 6)
+        .attr('markerHeight', 6)
+        .attr('orient', 'auto')
+        .append('path')
+        .attr('d', 'M0,-4L9,0L0,4Z')
+        .attr('fill', m.fill);
+    });
 
     const rootG = svg.append('g').attr('class', 'sociogram-root');
 
@@ -221,11 +232,18 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
       const rInner = minDim * 0.16;
       const rMid = minDim * 0.31;
       const rOuter = minDim * 0.44;
-      const rings = [
-        { r: rOuter, label: '주변·관심 필요권', fill: 'rgba(248, 250, 252, 0.7)' },
-        { r: rMid, label: '일반 관계권', fill: 'rgba(241, 245, 249, 0.55)' },
-        { r: rInner, label: '핵심 인기권', fill: 'rgba(236, 253, 245, 0.55)' },
-      ];
+      const rings =
+        colorBy === 'closeness'
+          ? [
+              { r: rOuter, label: '친밀도 낮음 · 주의권', fill: 'rgba(254, 242, 242, 0.45)' },
+              { r: rMid, label: '친밀도 보통권', fill: 'rgba(241, 245, 249, 0.55)' },
+              { r: rInner, label: '친밀도 높음 (핵심권)', fill: 'rgba(236, 253, 245, 0.6)' },
+            ]
+          : [
+              { r: rOuter, label: '주변·관심 필요권', fill: 'rgba(248, 250, 252, 0.7)' },
+              { r: rMid, label: '일반 관계권', fill: 'rgba(241, 245, 249, 0.55)' },
+              { r: rInner, label: '핵심 인기권', fill: 'rgba(236, 253, 245, 0.55)' },
+            ];
 
       rings.forEach((ring) => {
         ringsGroup
@@ -287,14 +305,23 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
         initX = cx + radius * Math.cos(angle);
         initY = cy + radius * Math.sin(angle);
       } else if (layoutMode === 'target') {
-        // Place high positiveIn in inner ring, medium in middle, 0-1 in outer ring
-        const ratio = m.positiveIn / maxPosIn;
-        const ringRadius =
-          ratio >= 0.65
-            ? minDim * 0.11
-            : ratio >= 0.3
-            ? minDim * 0.25
-            : minDim * 0.39;
+        let ringRadius = minDim * 0.39;
+        if (colorBy === 'closeness' && m.avgClosenessReceived !== null) {
+          ringRadius =
+            m.avgClosenessReceived >= 0.4
+              ? minDim * 0.11
+              : m.avgClosenessReceived >= 0
+              ? minDim * 0.25
+              : minDim * 0.39;
+        } else {
+          const ratio = m.positiveIn / maxPosIn;
+          ringRadius =
+            ratio >= 0.65
+              ? minDim * 0.11
+              : ratio >= 0.3
+              ? minDim * 0.25
+              : minDim * 0.39;
+        }
         const angle = (2 * Math.PI * idx) / orderedMetrics.length - Math.PI / 2;
         initX = cx + ringRadius * Math.cos(angle);
         initY = cy + ringRadius * Math.sin(angle);
@@ -309,6 +336,8 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
         positiveOut: m.positiveOut,
         negativeIn: m.negativeIn,
         mutualCount: m.mutualIds.length,
+        avgClosenessReceived: m.avgClosenessReceived,
+        avgClosenessGiven: m.avgClosenessGiven,
         sociometricType: m.sociometricType,
         responded: m.responded,
         clusterColor: clusterColorByStudentId[m.student.id] || '#94A3B8',
@@ -326,6 +355,8 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
       target: e.target,
       type: e.type,
       weight: e.weight,
+      maxScore: e.maxScore,
+      minScore: e.minScore,
       questionIds: e.questionIds,
     }));
 
@@ -340,10 +371,24 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
             .forceLink<SimNode, SimLink>(links)
             .id((d) => d.id)
             .distance((l) =>
-              l.type === 'mutual' ? 92 : l.type === 'positive' ? 142 : 185
+              l.type === 'mutual'
+                ? l.minScore === 2
+                  ? 82
+                  : 105
+                : l.type === 'positive'
+                ? l.maxScore === 2
+                  ? 128
+                  : 152
+                : 190
             )
             .strength((l) =>
-              l.type === 'mutual' ? 0.58 : l.type === 'positive' ? 0.22 : 0.06
+              l.type === 'mutual'
+                ? l.minScore === 2
+                  ? 0.68
+                  : 0.45
+                : l.type === 'positive'
+                ? 0.22
+                : 0.06
             )
         )
         .force('charge', d3.forceManyBody<SimNode>().strength(-360))
@@ -366,6 +411,11 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
           d3
             .forceRadial<SimNode>(
               (d) => {
+                if (colorBy === 'closeness' && d.avgClosenessReceived !== null) {
+                  if (d.avgClosenessReceived >= 0.4) return minDim * 0.1;
+                  if (d.avgClosenessReceived >= 0) return minDim * 0.24;
+                  return minDim * 0.39;
+                }
                 const ratio = d.positiveIn / maxPosIn;
                 if (ratio >= 0.65) return minDim * 0.1;
                 if (ratio >= 0.3) return minDim * 0.24;
@@ -413,28 +463,40 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
       .enter()
       .append('path')
       .attr('fill', 'none')
-      .attr('stroke', (d) =>
-        d.type === 'mutual' ? '#059669' : d.type === 'negative' ? '#DC2626' : '#94A3B8'
+      .attr('stroke', (d) => {
+        if (d.type === 'mutual') return d.minScore === 2 ? '#059669' : '#0EA5E9';
+        if (d.type === 'negative') return d.minScore === -2 ? '#DC2626' : '#D97706';
+        return d.maxScore === 2 ? '#2563EB' : '#94A3B8';
+      })
+      .attr('stroke-width', (d) => {
+        if (d.type === 'mutual') return d.minScore === 2 ? 3.8 : 2.3;
+        if (d.type === 'negative') return d.minScore === -2 ? 2.1 : 1.5;
+        return d.maxScore === 2 ? 2.2 : 1.4;
+      })
+      .attr('stroke-dasharray', (d) =>
+        d.type === 'negative' ? (d.minScore === -2 ? '5,3' : '4,4') : null
       )
-      .attr('stroke-width', (d) =>
-        d.type === 'mutual'
-          ? Math.min(4.2, 2.2 + d.weight * 0.38)
-          : d.type === 'negative'
-          ? 1.7
-          : Math.min(2.6, 1.3 + d.weight * 0.3)
-      )
-      .attr('stroke-dasharray', (d) => (d.type === 'negative' ? '5,4' : null))
-      .attr('marker-end', (d) =>
-        d.type === 'positive'
-          ? 'url(#socio-arrow-pos)'
-          : d.type === 'negative'
-          ? 'url(#socio-arrow-neg)'
-          : null
-      )
+      .attr('marker-end', (d) => {
+        if (d.type === 'positive') {
+          return d.maxScore === 2 ? 'url(#socio-arrow-pos2)' : 'url(#socio-arrow-pos)';
+        }
+        if (d.type === 'negative') {
+          return d.minScore === -2 ? 'url(#socio-arrow-neg)' : 'url(#socio-arrow-neg1)';
+        }
+        return null;
+      })
       .style('cursor', 'pointer')
       .on('mouseenter', (event, d) => {
         const s = d.source as SimNode;
         const t = d.target as SimNode;
+        const matchedEdge = visibleEdges.find(
+          (e) =>
+            (e.source === s.id && e.target === t.id) ||
+            (d.type === 'mutual' && e.source === t.id && e.target === s.id)
+        );
+        const tagText = matchedEdge?.tags?.length
+          ? matchedEdge.tags.map((tg) => `#${tg}`).join(' ')
+          : '';
         const qNames = d.questionIds.map((id) => questionLabelMap[id] || id).join(', ');
         const pos = updateTooltipPos(event);
         setTooltip({
@@ -446,11 +508,19 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
               : `${s.name} → ${t.name}`,
           subtitle:
             d.type === 'mutual'
-              ? '상호 긍정 선택 (쌍방 친구)'
+              ? d.minScore === 2
+                ? '핵심 단짝 (+2 ↔ +2)'
+                : d.maxScore === 2
+                ? '상호 우호 (+2 ↔ +1)'
+                : '상호 우호 (+1 ↔ +1)'
               : d.type === 'negative'
-              ? '갈등·불편 지명'
-              : '일방 긍정 선택',
-          detail: `해당 문항: ${qNames} · 선택 빈도 ${d.weight}회`,
+              ? d.minScore === -2
+                ? '불편함·갈등 (-2)'
+                : '조금 어색함 (-1)'
+              : d.maxScore === 2
+              ? '일방 매우 친함 (+2)'
+              : '일방 친한 편 (+1)',
+          detail: tagText || `문항: ${qNames}`,
         });
       })
       .on('mousemove', (event) => {
@@ -486,12 +556,16 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
       })
       .on('mouseenter', (event, d) => {
         const pos = updateTooltipPos(event);
+        const avgStr =
+          d.avgClosenessReceived !== null
+            ? `${d.avgClosenessReceived > 0 ? '+' : ''}${d.avgClosenessReceived.toFixed(2)}`
+            : '—';
         setTooltip({
           x: pos.x,
           y: pos.y,
           title: `${d.number}번 ${d.name} (${d.gender})`,
-          subtitle: `${d.sociometricType} · ${d.responded ? '응답완료' : '미응답'}`,
-          detail: `긍정받음 ${d.positiveIn} · 상호 ${d.mutualCount} · 갈등 ${d.negativeIn}`,
+          subtitle: `${d.sociometricType} · 평균친밀 ${avgStr}`,
+          detail: `긍정받음 ${d.positiveIn} · 상호 ${d.mutualCount} · 불편·어색 ${d.negativeIn}`,
         });
       })
       .on('mousemove', (event) => {
@@ -523,6 +597,7 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
       .attr('class', 'node-core')
       .attr('r', (d) => nodeRadius(d))
       .attr('fill', (d) => {
+        if (colorBy === 'closeness') return getClosenessNodeColor(d.avgClosenessReceived);
         if (colorBy === 'type') return TYPE_COLOR[d.sociometricType];
         if (colorBy === 'cluster') return d.clusterColor;
         return d.gender === '남' ? '#2563EB' : '#DB2777';
@@ -867,19 +942,36 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
               ))}
             </div>
 
-            {/* Question Filter */}
+            {/* Closeness & Tag Filter */}
             <select
               value={questionFilter}
               onChange={(e) => setQuestionFilter(e.target.value)}
-              aria-label="문항별 필터"
+              aria-label="친밀도 단계 및 태그 필터"
               className="text-xs font-medium border border-slate-200 rounded-lg px-2.5 py-1.5 bg-white text-slate-800 focus:outline-none focus:border-blue-600"
             >
-              <option value="all">전체 문항 통합</option>
-              {survey.questions.map((q, idx) => (
-                <option key={q.id} value={q.id}>
-                  Q{idx + 1}. {q.text.length > 22 ? `${q.text.slice(0, 22)}…` : q.text}
-                </option>
-              ))}
+              <option value="all">전체 관계 (+2 ~ -2)</option>
+              <optgroup label="친밀도 단계 필터">
+                <option value="score2">매우 친함 (+2)만 보기</option>
+                <option value="score1">친한 편 (+1)만 보기</option>
+                <option value="score1plus">긍정 전체 (+1, +2)</option>
+                <option value="scoreNeg1">어색함 (-1)만 보기</option>
+                <option value="scoreNeg2">불편함 (-2)만 보기</option>
+                <option value="negative">어색·불편 전체 (-1, -2)</option>
+              </optgroup>
+              <optgroup label="긍정 태그 필터">
+                {POSITIVE_RELATION_TAGS.map((tag) => (
+                  <option key={tag} value={`tag:${tag}`}>
+                    #{tag}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="갈등·어색 태그 필터">
+                {NEGATIVE_RELATION_TAGS.map((tag) => (
+                  <option key={tag} value={`tag:${tag}`}>
+                    #{tag}
+                  </option>
+                ))}
+              </optgroup>
             </select>
 
             {/* Color By Mode */}
@@ -887,6 +979,7 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
               {(
                 [
                   { id: 'gender', label: '성별' },
+                  { id: 'closeness', label: '친밀도' },
                   { id: 'type', label: '관계유형' },
                   { id: 'cluster', label: '또래그룹' },
                 ] as const
@@ -1107,7 +1200,7 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
 
           {/* Legend Strip */}
           <div className="px-4 py-2.5 border-t border-slate-200 bg-white flex flex-wrap items-center justify-between gap-3 text-xs text-slate-600">
-            <div className="flex flex-wrap items-center gap-4">
+            <div className="flex flex-wrap items-center gap-3.5">
               {colorBy === 'gender' ? (
                 <>
                   <span className="inline-flex items-center gap-1.5">
@@ -1115,6 +1208,29 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
                   </span>
                   <span className="inline-flex items-center gap-1.5">
                     <span className="w-2.5 h-2.5 rounded-full bg-pink-600 inline-block" />여
+                  </span>
+                </>
+              ) : colorBy === 'closeness' ? (
+                <>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 inline-block" />
+                    높음(+0.45↑)
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="w-2.5 h-2.5 rounded-full bg-blue-600 inline-block" />
+                    긍정
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="w-2.5 h-2.5 rounded-full bg-slate-500 inline-block" />
+                    보통
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="w-2.5 h-2.5 rounded-full bg-amber-600 inline-block" />
+                    어색
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="w-2.5 h-2.5 rounded-full bg-red-600 inline-block" />
+                    주의(-0.45↓)
                   </span>
                 </>
               ) : colorBy === 'type' ? (
@@ -1139,17 +1255,25 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
                 ))
               )}
               <span className="text-slate-300">|</span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="w-4 h-0.5 bg-emerald-600 inline-block" />
-                상호 선택
+              <span className="inline-flex items-center gap-1">
+                <span className="w-3.5 h-1 bg-emerald-600 inline-block rounded-xs" />
+                단짝(+2↔+2)
               </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="w-4 h-0.5 bg-slate-400 inline-block" />
-                일방 선택
+              <span className="inline-flex items-center gap-1">
+                <span className="w-3.5 h-0.5 bg-sky-500 inline-block" />
+                상호우호
               </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="w-4 border-t-2 border-dashed border-red-600 inline-block" />
-                갈등 지명
+              <span className="inline-flex items-center gap-1">
+                <span className="w-3.5 h-0.5 bg-blue-600 inline-block" />
+                일방+2
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-3.5 border-t-2 border-dashed border-amber-600 inline-block" />
+                어색-1
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-3.5 border-t-2 border-dashed border-red-600 inline-block" />
+                불편-2
               </span>
             </div>
             <span className="text-slate-500">드래그로 위치 고정 · 더블클릭으로 고정 해제</span>
@@ -1193,24 +1317,102 @@ export const SociogramCanvas: React.FC<SociogramCanvasProps> = ({
               {/* Numeric summary strip */}
               <div className="grid grid-cols-4 gap-2 text-center py-2 border-b border-slate-100 tabular-nums">
                 <div>
-                  <p className="text-xs text-slate-500">선택받음</p>
-                  <p className="text-lg font-bold text-slate-900">{selectedMetric.positiveIn}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-500">선택함</p>
-                  <p className="text-lg font-bold text-slate-900">{selectedMetric.positiveOut}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-500">상호친구</p>
-                  <p className="text-lg font-bold text-emerald-700">
-                    {selectedMetric.mutualIds.length}
+                  <p className="text-xs text-slate-500">받은친밀</p>
+                  <p className="text-base font-bold text-slate-900">
+                    {selectedMetric.avgClosenessReceived !== null
+                      ? `${selectedMetric.avgClosenessReceived > 0 ? '+' : ''}${selectedMetric.avgClosenessReceived.toFixed(2)}`
+                      : '—'}
                   </p>
                 </div>
                 <div>
-                  <p className="text-xs text-slate-500">갈등지명</p>
-                  <p className="text-lg font-bold text-red-600">{selectedMetric.negativeIn}</p>
+                  <p className="text-xs text-slate-500">준친밀</p>
+                  <p className="text-base font-bold text-slate-700">
+                    {selectedMetric.avgClosenessGiven !== null
+                      ? `${selectedMetric.avgClosenessGiven > 0 ? '+' : ''}${selectedMetric.avgClosenessGiven.toFixed(2)}`
+                      : '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500">상호단짝</p>
+                  <p className="text-base font-bold text-emerald-700">
+                    {selectedMetric.bestFriendPairIds.length}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500">불편·어색</p>
+                  <p className="text-base font-bold text-red-600">{selectedMetric.negativeIn}</p>
                 </div>
               </div>
+
+              {/* Mini 5-Level Received Closeness Distribution Bar */}
+              {(() => {
+                const rc = selectedMetric.receivedScoreCounts;
+                const tot = rc[2] + rc[1] + rc[0] + rc[-1] + rc[-2];
+                if (tot === 0) return null;
+                const segs = [
+                  { score: 2, count: rc[2], color: '#059669', label: '+2' },
+                  { score: 1, count: rc[1], color: '#2563EB', label: '+1' },
+                  { score: 0, count: rc[0], color: '#CBD5E1', label: '0' },
+                  { score: -1, count: rc[-1], color: '#D97706', label: '-1' },
+                  { score: -2, count: rc[-2], color: '#DC2626', label: '-2' },
+                ];
+                return (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px] text-slate-500 tabular-nums">
+                      <span className="font-semibold text-slate-700">받은 친밀도 분포</span>
+                      <span>
+                        +2:{rc[2]} · +1:{rc[1]} · 0:{rc[0]} · -1:{rc[-1]} · -2:{rc[-2]}
+                      </span>
+                    </div>
+                    <div className="h-2.5 w-full rounded overflow-hidden flex bg-slate-100">
+                      {segs.map((seg) =>
+                        seg.count > 0 ? (
+                          <div
+                            key={seg.score}
+                            style={{
+                              width: `${(seg.count / tot) * 100}%`,
+                              backgroundColor: seg.color,
+                            }}
+                            title={`${seg.label}: ${seg.count}명`}
+                          />
+                        ) : null
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {onViewStudentResponse && (
+                <button
+                  type="button"
+                  onClick={() => onViewStudentResponse(selectedMetric.student.id)}
+                  className="w-full py-2 px-3 text-xs font-semibold text-blue-800 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors cursor-pointer"
+                >
+                  {selectedMetric.student.name} 학생의 1:1 전체 응답표 보기
+                </button>
+              )}
+
+              {(selectedMetric.topPositiveTags.length > 0 ||
+                selectedMetric.topNegativeTags.length > 0) && (
+                <div className="text-xs space-y-1">
+                  {selectedMetric.topPositiveTags.length > 0 && (
+                    <p className="text-slate-600">
+                      <span className="font-semibold text-blue-700 mr-1.5">긍정 태그</span>
+                      {selectedMetric.topPositiveTags
+                        .map((t) => `#${t.tag}(${t.count})`)
+                        .join('  ')}
+                    </p>
+                  )}
+                  {selectedMetric.topNegativeTags.length > 0 && (
+                    <p className="text-slate-600">
+                      <span className="font-semibold text-red-600 mr-1.5">갈등 태그</span>
+                      {selectedMetric.topNegativeTags
+                        .map((t) => `#${t.tag}(${t.count})`)
+                        .join('  ')}
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* Relationship lists */}
               <div className="space-y-3.5 text-sm flex-1 overflow-y-auto">
