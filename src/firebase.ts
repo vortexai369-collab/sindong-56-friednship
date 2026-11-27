@@ -1,13 +1,44 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider } from 'firebase/auth';
+import {
+  browserPopupRedirectResolver,
+  getAuth,
+  getRedirectResult,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signInWithRedirect,
+} from 'firebase/auth';
 import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
+auth.useDeviceLanguage();
+
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
+
+/**
+ * Proactively warms up Firebase's browserPopupRedirectResolver hidden auth iframe
+ * on app startup so signInWithPopup() opens the Google login window immediately
+ * within the user's click gesture instead of losing transient activation while
+ * waiting for gapi/iframe initialization.
+ */
+export const redirectResultPromise = getRedirectResult(
+  auth,
+  browserPopupRedirectResolver
+).catch((error) => {
+  console.error('Firebase redirect result check failed:', error);
+  return null;
+});
+
+export function signInWithGooglePopup() {
+  return signInWithPopup(auth, googleProvider, browserPopupRedirectResolver);
+}
+
+export function signInWithGoogleRedirect() {
+  return signInWithRedirect(auth, googleProvider, browserPopupRedirectResolver);
+}
 
 export enum OperationType {
   CREATE = 'create',

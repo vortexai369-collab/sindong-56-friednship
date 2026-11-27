@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
-import { ArrowRight, Check, FileSpreadsheet, Lock, Network, Users } from 'lucide-react';
+import { ArrowRight, Check, ExternalLink, FileSpreadsheet, Lock, Network, Users } from 'lucide-react';
+import type { AuthErrorState } from '../App';
 
 interface LandingPageProps {
   onSignIn: () => Promise<void>;
-  authError: string | null;
+  onSignInRedirect: () => Promise<void>;
+  authError: AuthErrorState | null;
   signingIn: boolean;
   hasStudentDeepLink: boolean;
 }
@@ -32,11 +34,14 @@ const PREVIEW_EDGES = [
 
 export const LandingPage: React.FC<LandingPageProps> = ({
   onSignIn,
+  onSignInRedirect,
   authError,
   signingIn,
   hasStudentDeepLink,
 }) => {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const isEmbeddedIframe =
+    typeof window !== 'undefined' && window.self !== window.top;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
@@ -84,13 +89,60 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               disabled={signingIn}
               className="px-4 py-2 text-sm font-medium text-white bg-blue-700 rounded-lg hover:bg-blue-800 disabled:opacity-60 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              {signingIn ? '로그인 중...' : 'Google로 시작하기'}
+              {signingIn ? '로그인 창 여는 중...' : 'Google로 시작하기'}
             </button>
           </div>
         </div>
       </header>
 
       <main id="top" className="flex-1">
+        {/* Top Auth Feedback Banner (always visible regardless of which button was clicked) */}
+        {authError && (
+          <div className="bg-red-50 border-b border-red-200">
+            <div className="max-w-6xl mx-auto px-6 py-3.5 flex flex-wrap items-center justify-between gap-4">
+              <div className="space-y-0.5 text-sm text-red-900">
+                <p className="font-medium">{authError.message}</p>
+                {authError.code && (
+                  <p className="text-xs font-mono text-red-700">오류 코드: {authError.code}</p>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {authError.suggestRedirectOrNewTab && (
+                  <>
+                    <a
+                      href={typeof window !== 'undefined' ? window.location.href : '#'}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 whitespace-nowrap"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      새 탭에서 열기
+                    </a>
+                    {!isEmbeddedIframe && (
+                      <button
+                        type="button"
+                        onClick={onSignInRedirect}
+                        disabled={signingIn}
+                        className="px-3 py-1.5 text-xs font-semibold text-red-900 bg-white border border-red-300 rounded-lg hover:bg-red-100 whitespace-nowrap cursor-pointer"
+                      >
+                        현재 창에서 로그인
+                      </button>
+                    )}
+                  </>
+                )}
+                <button
+                  type="button"
+                  onClick={onSignIn}
+                  disabled={signingIn}
+                  className="px-3 py-1.5 text-xs font-semibold text-blue-800 bg-white border border-blue-200 rounded-lg hover:bg-blue-50 whitespace-nowrap cursor-pointer"
+                >
+                  팝업 다시 시도
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Hero Split */}
         <section className="max-w-6xl mx-auto px-6 pt-14 pb-16 lg:pt-20 lg:pb-20">
           {hasStudentDeepLink && (
@@ -146,19 +198,25 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                       d="M12 24c3.24 0 5.95-1.07 7.93-2.91l-3.72-2.89c-1.07.72-2.45 1.15-4.21 1.15-3.08 0-5.69-1.82-6.66-4.71L1.28 17.4C3.25 21.31 7.31 24 12 24z"
                     />
                   </svg>
-                  {signingIn ? 'Google 계정 확인 중...' : 'Google 계정으로 시작하기'}
+                  {signingIn ? 'Google 로그인 창 여는 중...' : 'Google 계정으로 시작하기'}
                   <ArrowRight className="w-4 h-4" />
                 </button>
-                <span className="text-xs text-slate-500">
-                  교사 대시보드 · 학생 코드 설문 모두 지원
-                </span>
+                {isEmbeddedIframe ? (
+                  <a
+                    href={typeof window !== 'undefined' ? window.location.href : '#'}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 underline underline-offset-2 whitespace-nowrap"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    팝업이 안 뜨면 새 탭에서 열기
+                  </a>
+                ) : (
+                  <span className="text-xs text-slate-500">
+                    교사 대시보드 · 학생 코드 설문 모두 지원
+                  </span>
+                )}
               </div>
-
-              {authError && (
-                <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3.5 py-2.5">
-                  {authError}
-                </p>
-              )}
             </div>
 
             {/* Interactive Sociogram Preview Panel */}
