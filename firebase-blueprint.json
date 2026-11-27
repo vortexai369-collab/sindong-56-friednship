@@ -1,0 +1,378 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated teacher profile storing display settings without sensitive PII.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the teacher."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Teacher display name."
+        },
+        "photoURL": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Optional profile photo URL."
+        },
+        "schoolName": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "School or institution name."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the profile was last updated."
+        }
+      },
+      "required": ["uid", "displayName", "photoURL", "schoolName", "createdAt", "updatedAt"]
+    },
+    "Survey": {
+      "title": "Survey",
+      "description": "A classroom peer-relationship survey session created and owned by a teacher.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Teacher Firebase Auth UID."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Survey title (e.g. 1학기 교우관계 조사)."
+        },
+        "className": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "description": "Classroom label (e.g. 5학년 3반)."
+        },
+        "academicYear": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "description": "Academic year (e.g. 2026)."
+        },
+        "joinCode": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[A-Z0-9]+$",
+          "description": "Uppercase alphanumeric classroom code shared with students."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["open", "closed"],
+          "description": "Whether student submissions are currently accepted."
+        },
+        "questions": {
+          "type": "array",
+          "description": "Bounded list (1 to 8) of sociometric survey questions."
+        },
+        "allowTeacherNote": {
+          "type": "boolean",
+          "description": "Whether students can leave a private free-text message to the teacher."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "ownerId",
+        "title",
+        "className",
+        "academicYear",
+        "joinCode",
+        "status",
+        "questions",
+        "allowTeacherNote",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Student": {
+      "title": "Student",
+      "description": "Individual student roster entry matching the 7942 sheet schema (학생ID, 번호, 이름, 성별, 코드, 상태).",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "surveyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "studentCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "description": "학생ID"
+        },
+        "number": {
+          "type": "number",
+          "description": "출석번호 (1-100)"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "학생 이름"
+        },
+        "gender": {
+          "type": "string",
+          "enum": ["남", "여"],
+          "description": "성별"
+        },
+        "accessCode": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[A-Z0-9]+$",
+          "description": "개별 접속 코드"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["미응답", "응답완료"],
+          "description": "응답 상태"
+        },
+        "memo": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "교사 비공개 상담 메모"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "surveyId",
+        "studentCode",
+        "number",
+        "name",
+        "gender",
+        "accessCode",
+        "status",
+        "memo",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SurveyInvite": {
+      "title": "SurveyInvite",
+      "description": "Capability-keyed student invite document keyed by {joinCode}_{accessCode} so students can fetch their own survey packet without accessing private roster or responses.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "surveyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "studentDocId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "studentCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "studentNumber": {
+          "type": "number"
+        },
+        "studentName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "surveyTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "className": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "surveyStatus": {
+          "type": "string",
+          "enum": ["open", "closed"]
+        },
+        "allowTeacherNote": {
+          "type": "boolean"
+        },
+        "questions": {
+          "type": "array"
+        },
+        "classmates": {
+          "type": "array"
+        },
+        "submitted": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "surveyId",
+        "studentDocId",
+        "studentCode",
+        "studentNumber",
+        "studentName",
+        "surveyTitle",
+        "className",
+        "surveyStatus",
+        "allowTeacherNote",
+        "questions",
+        "classmates",
+        "submitted",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SurveyResponse": {
+      "title": "SurveyResponse",
+      "description": "Confidential peer-nomination response submitted by a student and readable strictly by the owning teacher.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "surveyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "studentDocId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "studentCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "inviteKey": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "submittedByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "answers": {
+          "type": "array",
+          "description": "Bounded list (1 to 8) of question answer objects."
+        },
+        "teacherNote": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "surveyId",
+        "studentDocId",
+        "studentCode",
+        "inviteKey",
+        "submittedByUid",
+        "answers",
+        "teacherNote",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Teacher account settings isolated strictly per authenticated user."
+    },
+    "/surveys/{surveyId}": {
+      "schema": { "$ref": "#/entities/Survey" },
+      "description": "Teacher-owned peer-relationship surveys."
+    },
+    "/surveys/{surveyId}/students/{studentId}": {
+      "schema": { "$ref": "#/entities/Student" },
+      "description": "Private student roster, individual access codes, and teacher counseling memos."
+    },
+    "/surveys/{surveyId}/responses/{studentDocId}": {
+      "schema": { "$ref": "#/entities/SurveyResponse" },
+      "description": "Confidential sociometric responses readable only by the owning teacher."
+    },
+    "/surveyInvites/{inviteKey}": {
+      "schema": { "$ref": "#/entities/SurveyInvite" },
+      "description": "Capability-keyed student survey packets (joinCode_accessCode) preventing roster enumeration."
+    }
+  }
+}

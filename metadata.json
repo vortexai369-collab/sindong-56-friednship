@@ -1,0 +1,8 @@
+{
+  "name": "7942 친구사이 — 교우관계 조사 및 소시오그램 분석",
+  "description": "구글 시트 명단 연동, 학생 개별 코드 설문, 실시간 인터랙티브 교우관계망(소시오그램)과 소시오메트리 분석을 제공하는 학급 교우관계 조사 플랫폼입니다.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

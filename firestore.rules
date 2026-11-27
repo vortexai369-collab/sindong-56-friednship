@@ -1,0 +1,410 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default deny all unmatched paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Global Primitives & Validation Helpers
+    // -------------------------------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isSurveyOwner(surveyId) {
+      return exists(/databases/$(database)/documents/surveys/$(surveyId)) &&
+        get(/databases/$(database)/documents/surveys/$(surveyId)).data.ownerId == request.auth.uid;
+    }
+
+    function isValidQuestionList(listVal) {
+      return listVal is list &&
+        listVal.size() >= 1 &&
+        listVal.size() <= 8 &&
+        listVal[0] is map &&
+        listVal[0].id is string &&
+        listVal[0].id.size() >= 1 &&
+        listVal[0].id.size() <= 32 &&
+        listVal[0].text is string &&
+        listVal[0].text.size() >= 1 &&
+        listVal[0].text.size() <= 200 &&
+        listVal[0].category in ['positive', 'negative'] &&
+        listVal[0].maxSelect is int &&
+        listVal[0].maxSelect >= 1 &&
+        listVal[0].maxSelect <= 10;
+    }
+
+    function isValidClassmateList(listVal) {
+      return listVal is list &&
+        listVal.size() <= 60 &&
+        (listVal.size() == 0 || (
+          listVal[0] is map &&
+          listVal[0].id is string &&
+          listVal[0].id.size() >= 1 &&
+          listVal[0].id.size() <= 128 &&
+          listVal[0].number is int &&
+          listVal[0].name is string &&
+          listVal[0].name.size() >= 1 &&
+          listVal[0].name.size() <= 40 &&
+          listVal[0].gender in ['남', '여']
+        ));
+    }
+
+    function isValidAnswerList(listVal) {
+      return listVal is list &&
+        listVal.size() >= 1 &&
+        listVal.size() <= 8 &&
+        listVal[0] is map &&
+        listVal[0].questionId is string &&
+        listVal[0].questionId.size() >= 1 &&
+        listVal[0].questionId.size() <= 32 &&
+        listVal[0].category in ['positive', 'negative'] &&
+        listVal[0].selectedIds is list &&
+        listVal[0].selectedIds.size() <= 10 &&
+        (listVal[0].selectedIds.size() == 0 || (
+          listVal[0].selectedIds[0] is string &&
+          listVal[0].selectedIds[0].size() >= 1 &&
+          listVal[0].selectedIds[0].size() <= 128
+        ));
+    }
+
+    // Entity Blueprint Validators (Anti-Update-Gap)
+    function isValidUser(data, userId) {
+      return data.uid is string &&
+        data.uid == userId &&
+        data.uid == request.auth.uid &&
+        data.uid.size() >= 1 &&
+        data.uid.size() <= 128 &&
+        data.displayName is string &&
+        data.displayName.size() >= 1 &&
+        data.displayName.size() <= 80 &&
+        data.photoURL is string &&
+        data.photoURL.size() <= 500 &&
+        data.schoolName is string &&
+        data.schoolName.size() <= 100 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSurvey(data) {
+      return data.ownerId is string &&
+        isValidId(data.ownerId) &&
+        data.title is string &&
+        data.title.size() >= 1 &&
+        data.title.size() <= 120 &&
+        data.className is string &&
+        data.className.size() >= 1 &&
+        data.className.size() <= 60 &&
+        data.academicYear is string &&
+        data.academicYear.size() >= 1 &&
+        data.academicYear.size() <= 20 &&
+        data.joinCode is string &&
+        data.joinCode.size() >= 4 &&
+        data.joinCode.size() <= 16 &&
+        data.joinCode.matches('^[A-Z0-9]+$') &&
+        data.status in ['open', 'closed'] &&
+        isValidQuestionList(data.questions) &&
+        data.allowTeacherNote is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStudent(data, surveyId) {
+      return data.ownerId is string &&
+        isValidId(data.ownerId) &&
+        data.surveyId is string &&
+        data.surveyId == surveyId &&
+        data.studentCode is string &&
+        data.studentCode.size() >= 1 &&
+        data.studentCode.size() <= 32 &&
+        data.number is int &&
+        data.number >= 1 &&
+        data.number <= 100 &&
+        data.name is string &&
+        data.name.size() >= 1 &&
+        data.name.size() <= 40 &&
+        data.gender in ['남', '여'] &&
+        data.accessCode is string &&
+        data.accessCode.size() >= 4 &&
+        data.accessCode.size() <= 16 &&
+        data.accessCode.matches('^[A-Z0-9]+$') &&
+        data.status in ['미응답', '응답완료'] &&
+        data.memo is string &&
+        data.memo.size() <= 500 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidInvite(data) {
+      return data.ownerId is string &&
+        isValidId(data.ownerId) &&
+        data.surveyId is string &&
+        isValidId(data.surveyId) &&
+        data.studentDocId is string &&
+        isValidId(data.studentDocId) &&
+        data.studentCode is string &&
+        data.studentCode.size() >= 1 &&
+        data.studentCode.size() <= 32 &&
+        data.studentNumber is int &&
+        data.studentNumber >= 1 &&
+        data.studentNumber <= 100 &&
+        data.studentName is string &&
+        data.studentName.size() >= 1 &&
+        data.studentName.size() <= 40 &&
+        data.surveyTitle is string &&
+        data.surveyTitle.size() >= 1 &&
+        data.surveyTitle.size() <= 120 &&
+        data.className is string &&
+        data.className.size() >= 1 &&
+        data.className.size() <= 60 &&
+        data.surveyStatus in ['open', 'closed'] &&
+        data.allowTeacherNote is bool &&
+        isValidQuestionList(data.questions) &&
+        isValidClassmateList(data.classmates) &&
+        data.submitted is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidResponse(data, surveyId, studentDocId) {
+      return data.ownerId is string &&
+        isValidId(data.ownerId) &&
+        data.surveyId is string &&
+        data.surveyId == surveyId &&
+        data.studentDocId is string &&
+        data.studentDocId == studentDocId &&
+        data.studentCode is string &&
+        data.studentCode.size() >= 1 &&
+        data.studentCode.size() <= 32 &&
+        data.inviteKey is string &&
+        data.inviteKey.size() >= 5 &&
+        data.inviteKey.size() <= 64 &&
+        data.inviteKey.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.submittedByUid is string &&
+        isValidId(data.submittedByUid) &&
+        isValidAnswerList(data.answers) &&
+        data.teacherNote is string &&
+        data.teacherNote.size() <= 1000 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection 1: /users/{userId} (PII-isolated teacher profile)
+    // -------------------------------------------------------------------------
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+      allow create: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUser(incoming(), userId) &&
+        incoming().keys().hasAll(['uid', 'displayName', 'photoURL', 'schoolName', 'createdAt', 'updatedAt']) &&
+        incoming().keys().hasOnly(['uid', 'displayName', 'photoURL', 'schoolName', 'createdAt', 'updatedAt']) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUser(incoming(), userId) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'schoolName', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection 2: /surveys/{surveyId}
+    // -------------------------------------------------------------------------
+    match /surveys/{surveyId} {
+      allow get: if isVerifiedUser() &&
+        isValidId(surveyId) &&
+        existing().ownerId == request.auth.uid;
+      allow list: if isVerifiedUser() &&
+        existing().ownerId == request.auth.uid;
+      allow create: if isVerifiedUser() &&
+        isValidId(surveyId) &&
+        isValidSurvey(incoming()) &&
+        incoming().ownerId == request.auth.uid &&
+        incoming().keys().hasAll(['ownerId', 'title', 'className', 'academicYear', 'joinCode', 'status', 'questions', 'allowTeacherNote', 'createdAt', 'updatedAt']) &&
+        incoming().keys().hasOnly(['ownerId', 'title', 'className', 'academicYear', 'joinCode', 'status', 'questions', 'allowTeacherNote', 'createdAt', 'updatedAt']) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser() &&
+        isValidId(surveyId) &&
+        isValidSurvey(incoming()) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'className', 'academicYear', 'joinCode', 'questions', 'allowTeacherNote', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+        );
+      allow delete: if isVerifiedUser() &&
+        isValidId(surveyId) &&
+        existing().ownerId == request.auth.uid;
+
+      // -----------------------------------------------------------------------
+      // Subcollection 2a: /surveys/{surveyId}/students/{studentId}
+      // -----------------------------------------------------------------------
+      match /students/{studentId} {
+        allow get: if isVerifiedUser() &&
+          isValidId(surveyId) &&
+          isValidId(studentId) &&
+          existing().ownerId == request.auth.uid &&
+          isSurveyOwner(surveyId);
+        allow list: if isVerifiedUser() &&
+          existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(surveyId) &&
+          isValidId(studentId) &&
+          isValidStudent(incoming(), surveyId) &&
+          incoming().ownerId == request.auth.uid &&
+          incoming().keys().hasAll(['ownerId', 'surveyId', 'studentCode', 'number', 'name', 'gender', 'accessCode', 'status', 'memo', 'createdAt', 'updatedAt']) &&
+          incoming().keys().hasOnly(['ownerId', 'surveyId', 'studentCode', 'number', 'name', 'gender', 'accessCode', 'status', 'memo', 'createdAt', 'updatedAt']) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isSurveyOwner(surveyId);
+        allow update: if isVerifiedUser() &&
+          isValidId(surveyId) &&
+          isValidId(studentId) &&
+          isValidStudent(incoming(), surveyId) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().surveyId == existing().surveyId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isSurveyOwner(surveyId) &&
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['studentCode', 'number', 'name', 'gender', 'accessCode', 'updatedAt']) ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['memo', 'updatedAt'])
+          );
+        allow delete: if isVerifiedUser() &&
+          isValidId(surveyId) &&
+          isValidId(studentId) &&
+          existing().ownerId == request.auth.uid &&
+          isSurveyOwner(surveyId);
+      }
+
+      // -----------------------------------------------------------------------
+      // Subcollection 2b: /surveys/{surveyId}/responses/{studentDocId}
+      // -----------------------------------------------------------------------
+      match /responses/{studentDocId} {
+        allow get: if isVerifiedUser() &&
+          isValidId(surveyId) &&
+          isValidId(studentDocId) &&
+          existing().ownerId == request.auth.uid &&
+          isSurveyOwner(surveyId);
+        allow list: if isVerifiedUser() &&
+          existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(surveyId) &&
+          isValidId(studentDocId) &&
+          isValidResponse(incoming(), surveyId, studentDocId) &&
+          incoming().submittedByUid == request.auth.uid &&
+          incoming().keys().hasAll(['ownerId', 'surveyId', 'studentDocId', 'studentCode', 'inviteKey', 'submittedByUid', 'answers', 'teacherNote', 'createdAt', 'updatedAt']) &&
+          incoming().keys().hasOnly(['ownerId', 'surveyId', 'studentDocId', 'studentCode', 'inviteKey', 'submittedByUid', 'answers', 'teacherNote', 'createdAt', 'updatedAt']) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (
+            // Tier 1: Owning teacher creating sample or kiosk response
+            (incoming().ownerId == request.auth.uid && isSurveyOwner(surveyId)) ||
+            // Tier 2: Verified student submitting via valid open invite atomically
+            (
+              exists(/databases/$(database)/documents/surveyInvites/$(incoming().inviteKey)) &&
+              get(/databases/$(database)/documents/surveyInvites/$(incoming().inviteKey)).data.surveyId == surveyId &&
+              get(/databases/$(database)/documents/surveyInvites/$(incoming().inviteKey)).data.studentDocId == studentDocId &&
+              get(/databases/$(database)/documents/surveyInvites/$(incoming().inviteKey)).data.ownerId == incoming().ownerId &&
+              get(/databases/$(database)/documents/surveyInvites/$(incoming().inviteKey)).data.submitted == false &&
+              get(/databases/$(database)/documents/surveyInvites/$(incoming().inviteKey)).data.surveyStatus == 'open' &&
+              getAfter(/databases/$(database)/documents/surveyInvites/$(incoming().inviteKey)).data.submitted == true
+            )
+          );
+        allow update: if isVerifiedUser() &&
+          isValidId(surveyId) &&
+          isValidId(studentDocId) &&
+          isValidResponse(incoming(), surveyId, studentDocId) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().surveyId == existing().surveyId &&
+          incoming().studentDocId == existing().studentDocId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isSurveyOwner(surveyId) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['answers', 'teacherNote', 'updatedAt']);
+        allow delete: if isVerifiedUser() &&
+          isValidId(surveyId) &&
+          isValidId(studentDocId) &&
+          existing().ownerId == request.auth.uid &&
+          isSurveyOwner(surveyId);
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection 3: /surveyInvites/{inviteKey}
+    // -------------------------------------------------------------------------
+    match /surveyInvites/{inviteKey} {
+      allow get: if isVerifiedUser() && isValidId(inviteKey);
+      allow list: if isVerifiedUser() && existing().ownerId == request.auth.uid;
+      allow create: if isVerifiedUser() &&
+        isValidId(inviteKey) &&
+        isValidInvite(incoming()) &&
+        incoming().ownerId == request.auth.uid &&
+        incoming().keys().hasAll(['ownerId', 'surveyId', 'studentDocId', 'studentCode', 'studentNumber', 'studentName', 'surveyTitle', 'className', 'surveyStatus', 'allowTeacherNote', 'questions', 'classmates', 'submitted', 'createdAt', 'updatedAt']) &&
+        incoming().keys().hasOnly(['ownerId', 'surveyId', 'studentDocId', 'studentCode', 'studentNumber', 'studentName', 'surveyTitle', 'className', 'surveyStatus', 'allowTeacherNote', 'questions', 'classmates', 'submitted', 'createdAt', 'updatedAt']) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isSurveyOwner(incoming().surveyId);
+      allow update: if isVerifiedUser() &&
+        isValidId(inviteKey) &&
+        isValidInvite(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().surveyId == existing().surveyId &&
+        incoming().studentDocId == existing().studentDocId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          // Tier 1: Owning teacher syncing roster/questions/resetting submission
+          (
+            existing().ownerId == request.auth.uid &&
+            isSurveyOwner(existing().surveyId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['studentCode', 'studentNumber', 'studentName', 'surveyTitle', 'className', 'surveyStatus', 'allowTeacherNote', 'questions', 'classmates', 'submitted', 'updatedAt'])
+          ) ||
+          // Tier 2: Student completing open survey (Terminal State Locking + Atomicity)
+          (
+            existing().submitted == false &&
+            existing().surveyStatus == 'open' &&
+            incoming().submitted == true &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['submitted', 'updatedAt']) &&
+            existsAfter(/databases/$(database)/documents/surveys/$(existing().surveyId)/responses/$(existing().studentDocId))
+          )
+        );
+      allow delete: if isVerifiedUser() &&
+        isValidId(inviteKey) &&
+        existing().ownerId == request.auth.uid;
+    }
+  }
+}
